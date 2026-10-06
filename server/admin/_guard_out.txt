@@ -1,0 +1,8 @@
+================================================================
+小智后台管理台
+  地址:      http://127.0.0.1:8005
+  配置文件:  C:\Users\zuowe\WorkBuddy\2026-10-02-01-36-40\xiaozhi-deskemoji-agent\server\xiaozhi-server\data\.config.yaml
+  服务目录:  C:\Users\zuowe\WorkBuddy\2026-10-02-01-36-40\xiaozhi-deskemoji-agent\server\xiaozhi-server
+================================================================
+[开机自启] 后台服务已在运行，跳过拉起
+提示：本进程由你启动，它拉起的后台服务不会被回收。Ctrl+C 结束管理台。

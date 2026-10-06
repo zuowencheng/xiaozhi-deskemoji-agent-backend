@@ -1,0 +1,4 @@
+mcp[cli]<2
+websockets>=13
+python-dotenv
+psutil

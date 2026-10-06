@@ -1,0 +1,118 @@
+{
+  "ts": "2026-10-03 18:08:53",
+  "pass": 22,
+  "fail": 0,
+  "skip": 0,
+  "items": [
+    {
+      "name": "配置/plugins段",
+      "status": "PASS",
+      "detail": "✅ plugins 段存在，3 个插件: get_news_from_chinanews, get_weather, web_search"
+    },
+    {
+      "name": "配置/搜索key",
+      "status": "PASS",
+      "detail": "✅ 链路=firecrawl→tavily→metaso→serply / 已启用=['firecrawl', 'tavily'] / 免key通道=['firecrawl'] ✅"
+    },
+    {
+      "name": "配置/天气key",
+      "status": "PASS",
+      "detail": "✅ api_host=mj7p3y7naa.re.qweatherapi.com key=a861d0d5e7…（实测 401，会走 wttr.in 兜底）"
+    },
+    {
+      "name": "配置/语音合成",
+      "status": "PASS",
+      "detail": "✅ HuoshanV3TTS / speaker=zh_female_vv_uranus_bigtts / rid=seed-tts-2.0"
+    },
+    {
+      "name": "配置/语音识别",
+      "status": "PASS",
+      "detail": "✅ DoubaoASRStream / 热词表=b426a57f…"
+    },
+    {
+      "name": "配置/大模型",
+      "status": "PASS",
+      "detail": "✅ DeepSeekLLM / model=None"
+    },
+    {
+      "name": "配置/交互开关",
+      "status": "PASS",
+      "detail": "✅ play_sound_after_reply=True / active_greeting=嗨，"
+    },
+    {
+      "name": "配置/发音词典",
+      "status": "PASS",
+      "detail": "✅ 发音词典 13 条（自动加载）"
+    },
+    {
+      "name": "服务/端口8000",
+      "status": "PASS",
+      "detail": "✅ 端口 8000 在监听"
+    },
+    {
+      "name": "服务/端口8004",
+      "status": "PASS",
+      "detail": "✅ 端口 8004 在监听"
+    },
+    {
+      "name": "服务/端口8005",
+      "status": "PASS",
+      "detail": "✅ 端口 8005 在监听"
+    },
+    {
+      "name": "服务/设备在线",
+      "status": "PASS",
+      "detail": "✅ 设备在线 ['84:c7:bb:58:17:44']"
+    },
+    {
+      "name": "功能/联网搜索",
+      "status": "PASS",
+      "detail": "✅ 1191 字: 【联网搜索】来源：Firecrawl（免 key 免注册，1000 次/月）（1.78s） / 1. 北京今日油价查询_汽油价格网：北京油价 ; 北京92号汽油: 8.61(元) ; 北京95号汽油: 9.17(元) ; 北"
+    },
+    {
+      "name": "功能/天气查询",
+      "status": "PASS",
+      "detail": "✅ 您查询的位置是：北京（数据源 wttr.in）  当前天气: 晴间多云 详细参数：   温度 23℃  · 体感 20℃  · 湿度 24%  · 风 NW9km/h  未来几天预报：   · 2026-10-03  晴 ⚠️和风key已失效，当前走 wttr.in 免费兜底（能用，但精度略低）"
+    },
+    {
+      "name": "功能/语音合成实测",
+      "status": "PASS",
+      "detail": "✅ 合成 27117 字节（speaker=zh_female_vv_uranus_bigtts）"
+    },
+    {
+      "name": "功能/语音识别配置",
+      "status": "PASS",
+      "detail": "✅ 热词表 b426a57f… / 判停400ms"
+    },
+    {
+      "name": "功能/记忆库",
+      "status": "PASS",
+      "detail": "✅ 记忆 33 条"
+    },
+    {
+      "name": "功能/待办",
+      "status": "PASS",
+      "detail": "✅ 待办 {'pending': 1, 'done': 1, 'dropped': 0, 'overdue': 0, 'due_today': 0}"
+    },
+    {
+      "name": "功能/语音额度",
+      "status": "PASS",
+      "detail": "✅ TTS额度 2.0 已用 6671/20000（剩 13329，66.6%）"
+    },
+    {
+      "name": "功能/任务派发",
+      "status": "PASS",
+      "detail": "✅ 已完成任务 33/39 个（inbox 积压 0）"
+    },
+    {
+      "name": "功能/搜索引擎链",
+      "status": "PASS",
+      "detail": "✅ 走 firecrawl（1.01s） / 额度 firecrawl 10/1000"
+    },
+    {
+      "name": "硬件/提示音格式",
+      "status": "PASS",
+      "detail": "✅ 6 个音效全部是 Opus 格式"
+    }
+  ]
+}

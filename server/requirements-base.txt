@@ -1,0 +1,41 @@
+# 自建后台 · 精简依赖（云端 API 路线）
+#
+# 与上游 requirements.txt 的区别：去掉了 torch / torchaudio / funasr /
+# modelscope / sherpa_onnx / vosk 等本地大模型件（合计 2GB+），
+# 改为调用云端 ASR/LLM/TTS API。本机 Ollama 也会被当作 OpenAI 兼容接口使用。
+#
+# 安装：见 install.cmd（使用免安装 Python 3.11.16）
+
+numpy==1.26.4
+websockets==14.2
+opuslib_next==1.1.5
+pydub==0.25.1
+onnxruntime==1.22.0     # VAD 用的是 onnxruntime，不是 torch
+# 注意：不要装 pip 包 silero_vad —— 它依赖 torch（124MB+），
+#       而源码 core/providers/vad/silero.py 走的是 onnxruntime + models/ 下的 silero_vad.onnx
+
+openai==2.8.1
+edge_tts==7.2.6
+httpx==0.28.1
+aiohttp==3.13.2
+aiohttp_cors==0.8.1
+ormsgpack==1.12.0
+ruamel.yaml==0.18.16
+loguru==0.7.3
+requests==2.32.5
+
+mcp==1.22.0
+cnlunar==0.2.0
+psutil==7.1.3
+portalocker==3.2.0
+Jinja2==3.1.6
+aioconsole==0.8.2
+PyJWT==2.10.1
+bs4==0.0.2
+
+PyYAML==6.0.3          # 上游 requirements.txt 漏了它（写成了 pyyml），config_loader 直接 import yaml
+markitdown==0.1.3      # 新闻插件 get_news_from_newsnow 在 import 期就要它，缺了服务起不来
+
+# ---- 可选：依赖树大、装得慢，非必需，需要时再单独装 ----
+# mcp-proxy==0.10.0     # MCP 代理，本机桥用不上
+# sherpa_onnx==1.12.29  # 本地离线 ASR 引擎（模型已下载，需要时再装）

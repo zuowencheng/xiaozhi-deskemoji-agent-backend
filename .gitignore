@@ -1,0 +1,72 @@
+# 密钥与凭据 —— 永远不进仓库
+.env
+*.token
+mcp_endpoint*.txt
+
+# 全片备份 / 固件 bin（含数据，太大且敏感）
+hardware/reports/*.bin
+*.bin
+
+# Python
+__pycache__/
+.venv/
+venv/
+
+# ESP-IDF 构建产物
+build/
+sdkconfig.old
+managed_components/
+dependencies.lock.tmp
+
+# Node
+node_modules/
+
+# 系统垃圾
+Thumbs.db
+.DS_Store
+
+# MCP / 部署运行时（npm 包装在这里 + 工具日志）
+runtime/
+
+# ---- 服务端（2026-10-06 加）----
+# 服务端模型文件（1.1GB，不进仓库）
+# ⚠️ gitignore 不支持行尾注释：模式后面直接跟 # 会被当成路径的一部分！
+server/xiaozhi-server/models/
+server/xiaozhi-server/tmp/
+server/xiaozhi-server/_kugou_uia_dump*.txt
+server/_logs/
+*.log
+*.db
+data/.config.yaml                  # 含真实 API Key，只提交 config.yaml 模板
+*.bak-*
+
+# 固件是独立的 git 仓库（fork），不进根仓库；改动靠 firmware/patches/ 导出
+firmware/community/
+
+# fix_cmd_encoding.py 产生的行尾修复备份
+*.bak
+
+# 任务投递箱的运行时状态（含个人任务内容，不进仓库）
+bridge/inbox/
+bridge/done/
+bridge/announced/
+
+# 记忆库（含个人对话与画像，不进仓库）
+bridge/memory/
+
+# 回滚包 bin（大文件）
+hardware/reports/rollback_kit/*.bin
+
+# ===== 自建后台 =====
+# 私有配置与运行时（含 API Key，绝不进仓库）
+server/xiaozhi-server/data/
+server/xiaozhi-server/tmp/
+# 语音模型权重（SherpaASR 约 1GB）
+server/xiaozhi-server/models/sherpa-onnx-*/
+# 上游源码下载缓存与解压中间产物
+_download/
+*.tar.gz
+*.tar.bz2
+
+# WorkBuddy 工具链目录（记忆/技能，非项目资产）
+.workbuddy/

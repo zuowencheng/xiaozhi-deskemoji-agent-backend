@@ -1,0 +1,916 @@
+diff --git a/main/application.cc b/main/application.cc
+index b2381d8..96476dc 100644
+--- a/main/application.cc
++++ b/main/application.cc
+@@ -363,6 +363,18 @@ void Application::Start() {
+     /* Setup the audio service */
+     auto codec = board.GetAudioCodec();
+     audio_service_.Initialize(codec);
++    // ★★ 2026-10-03 提示音总闸：只放行「说完话提示音（可以说话了）」，
++    //   其余全部静音 —— 连接成功 success、表情 exclamation、低电量 low_battery、
++    //   按键 success、激活码逐位 0~9…一律不播。
++    //   主人原话「开场提示音永久去掉」。放在 Initialize 之后、Start 之前，
++    //   保证任何早期 PlaySound 也会被拦。
++    {
++        static const std::string_view kAllowed[] = {
++            Lang::Sounds::OGG_LISTENING,          // 「说完话可以说了」——唯一保留
++        };
++        audio_service_.SetSoundAllowlist(kAllowed,
++                                         sizeof(kAllowed) / sizeof(kAllowed[0]));
++    }
+     audio_service_.Start();
+ 
+     AudioServiceCallbacks callbacks;
+@@ -498,6 +510,28 @@ void Application::Start() {
+                     Schedule([this]() {
+                         Reboot();
+                     });
++                } else if (strcmp(command->valuestring, "sound") == 0) {
++                    // ★ 2026-10-03 服务端可控提示音。
++                    //   为什么不在 SetDeviceState(kDeviceStateListening) 里自动播？
++                    //   因为那样"说完话要不要响一声"写死在固件里，后台改不了；
++                    //   改走 system/sound 命令后，**管理台勾一下就生效，不用重新刷机**。
++                    //   发 {"type":"system","command":"sound","sound":"listening"|"popup"}
++                    auto snd = cJSON_GetObjectItem(root, "sound");
++                    bool is_popup = (snd && cJSON_IsString(snd) &&
++                                     strcmp(snd->valuestring, "popup") == 0);
++                    Schedule([this, is_popup]() {
++                        audio_service_.PlaySound(is_popup ? Lang::Sounds::OGG_POPUP
++                                                          : Lang::Sounds::OGG_LISTENING);
++                    });
++                } else if (strcmp(command->valuestring, "standby") == 0) {
++                    // ★ 2026-10-03 主人说「退下吧」要真的待机，不能还在后台聆听。
++                    //   发 {"type":"system","command":"standby"} → 关麦 + 回待机，
++                    //   设备只剩唤醒词监听，不再往服务端送音频。
++                    ESP_LOGI(TAG, "System command: standby（真实待机）");
++                    Schedule([this]() {
++                        aborted_ = true;
++                        SetDeviceState(kDeviceStateIdle);
++                    });
+                 } else {
+                     ESP_LOGW(TAG, "Unknown system command: %s", command->valuestring);
+                 }
+@@ -507,7 +541,10 @@ void Application::Start() {
+             auto message = cJSON_GetObjectItem(root, "message");
+             auto emotion = cJSON_GetObjectItem(root, "emotion");
+             if (cJSON_IsString(status) && cJSON_IsString(message) && cJSON_IsString(emotion)) {
+-                Alert(status->valuestring, message->valuestring, emotion->valuestring, Lang::Sounds::OGG_VIBRATION);
++                // ★ 2026-10-03 传空 sound：原来这里播 OGG_VIBRATION（"嘟"一声），
++                //   属于"该响的时候它自己响"，主人要求开场一律静音。
++                //   底层白名单也会拦，这里直接不传更干净。
++                Alert(status->valuestring, message->valuestring, emotion->valuestring, "");
+             } else {
+                 ESP_LOGW(TAG, "Alert command requires status, message and emotion");
+             }
+@@ -537,8 +574,10 @@ void Application::Start() {
+         std::string message = std::string(Lang::Strings::VERSION) + ota.GetCurrentVersion();
+         display->ShowNotification(message.c_str());
+         display->SetChatMessage("system", "");
+-        // Play the success sound to indicate the device is ready
+-        audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
++        // 2026-10-03 主人反馈：连上服务器时这一声「叮」特别刺耳，去掉。
++        // 原来播的是官方 OGG_SUCCESS（尖锐的提示音），只要不播就行。
++        // 需要提示音的地方统一由服务端发 system/sound 决定（可在后台勾选）。
++        // audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
+     }
+ 
+     // Start the main event loop task with priority 3
+@@ -613,6 +652,72 @@ void Application::MainEventLoop() {
+                 // SystemInfo::PrintTaskList();
+                 SystemInfo::PrintHeapStats();
+             }
++
++            // ★ 本地改造（2026-10-02）：桌面常供电设备 —— 保持与服务端的长连接
++            // 背景：本设备是插电台式机，不需要"空闲就断开省电"。
++            //   服务端要能随时推送「任务完成播报」「定时提醒」这类主动语音，
++            //   前提是设备此刻挂在 WebSocket 上（否则服务端 /notify 只能收到 503）。
++            // 实测：设备原来只在唤醒时连接，说完话就断，主动播报无处可推。
++            // 做法：每 5 秒看一次，处于 idle 且未连接就补上；对话中不打扰。
++            if (clock_ticks_ % 5 == 0
++                && device_state_ == kDeviceStateIdle
++                && protocol_ && !protocol_->IsAudioChannelOpened()) {
++                ESP_LOGI(TAG, "KeepAlive: idle 且未连接，尝试保持长连接");
++                Schedule([this]() {
++                    if (device_state_ == kDeviceStateIdle
++                        && protocol_ && !protocol_->IsAudioChannelOpened()) {
++                        if (protocol_->OpenAudioChannel()) {
++                            ESP_LOGI(TAG, "KeepAlive: 已建立常连（idle 等待服务端主动播报）");
++                        } else {
++                            ESP_LOGW(TAG, "KeepAlive: 建连失败，5 秒后重试");
++                        }
++                    }
++                });
++            }
++
++            // ★★ 2026-10-03 后台重启后的自动重连（主人报「重启后台后屏幕一直显示
++            //   无法连接服务，直到主动唤醒才恢复」）。
++            // 根因：MAIN_EVENT_ERROR 分支里 SetDeviceState(kIdle) 就结束了，
++            //   设备再也不去开音频通道 → 永远停在"连接不上"，必须靠唤醒触发
++            //   StartListening 里的 OpenAudioChannel 才会恢复。
++            // 做法：每 5 秒探测一次，**不限当前状态**（只要不是正在对话/说话），
++            //   没连接就主动重连。16 秒后仍不成功 → 显示"连接中"而不是"无法连接"，
++            //   因为此时它确实在不断重试，展示"正在连接"更贴近事实。
++            if (clock_ticks_ % 5 == 0
++                && protocol_ && !protocol_->IsAudioChannelOpened()
++                && device_state_ != kDeviceStateSpeaking
++                && device_state_ != kDeviceStateListening) {
++                if (server_unreachable_ticks_ == 0) {
++                    ESP_LOGI(TAG, "Reconnect: 音频通道未开，主动重连服务端");
++                    Schedule([this]() {
++                        if (protocol_ && !protocol_->IsAudioChannelOpened()
++                            && device_state_ != kDeviceStateSpeaking
++                            && device_state_ != kDeviceStateListening) {
++                            if (protocol_->OpenAudioChannel()) {
++                                ESP_LOGI(TAG, "Reconnect: 已重新连上后台");
++                            } else {
++                                ESP_LOGW(TAG, "Reconnect: 重连失败，继续等待下一轮");
++                            }
++                        }
++                    });
++                }
++                server_unreachable_ticks_++;
++                // 16 秒（4 轮）还连不上 → 显示"连接中"，别再显示"无法连接"
++                if (server_unreachable_ticks_ == 4) {
++                    auto display = Board::GetInstance().GetDisplay();
++                    if (display) {
++                        display->SetStatus(Lang::Strings::CONNECTING);
++                        display->SetChatMessage("system", "正在重连后台…");
++                    }
++                    ESP_LOGW(TAG, "Reconnect: 多次尝试未成功，屏幕改为显示「正在重连」");
++                }
++            }
++            // 连上了就清零计数
++            if (protocol_ && protocol_->IsAudioChannelOpened()
++                && server_unreachable_ticks_ != 0) {
++                server_unreachable_ticks_ = 0;
++                ESP_LOGI(TAG, "Reconnect: 已连接，恢复正常");
++            }
+         }
+     }
+ }
+@@ -645,9 +750,25 @@ void Application::OnWakeWordDetected() {
+         SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
+ #else
+         SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
+-        // Play the pop up sound to indicate the wake word is detected
+-        audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
+ #endif
++        // ⚠️ 2026-10-03 踩坑记录（勿再重复）：
++        //   这里我曾把 AutoStop 改成 ManualStop，理由是「本板无 AEC，做不到边放边听，
++        //   说完话应该回待机」。**这个改动是错的**，实测症状是：
++        //     主人说「你好小智」→ 设备刚进聆听态、主人还没开口
++        //     → 服务端 VAD 判空音频 → 立刻发 tts stop
++        //     → ManualStop 分支直接 SetDeviceState(kIdle) → 屏幕变「待命」
++        //     → 主人后面说的话**完全不录**，「叫小智没反应」。
++        //   根因：ManualStop 的语义是"**本段音频结束就收工**"，
++        //   它不等 VAD 判完，设计上就是给"按键说话"那种一次性交互用的。
++        //   语音唤醒场景必须用 AutoStop —— 由**服务端 VAD 判断说完了没**，
++        //   设备只负责继续收音。这正是上游 `aec_mode_ == kAecOff ? AutoStop : Realtime`
++        //   这行的用意（本板无 AEC → 走 AutoStop）。
++        //   之前"话被切碎/一直聆听"的真凶是 VAD 参数被调错，不是这个模式。
++        // 2026-10-03：这里原本补过一句 PlaySound(OGG_POPUP)，但唤醒后紧接着就进
++        // kDeviceStateListening，那边会播 OGG_LISTENING —— 两个音连着响很怪，已移除。
++        // 提示音统一在 SetDeviceState(kDeviceStateListening) 里播。
++        // ⚠️ 顺带记一笔坑：PlaySound 只认 **Opus in Ogg**（找 "OpusHead"），
++        //    之前用 soundfile 生成的是 OGG Vorbis → seen_head 永远 false → 一个字节不播。
+     } else if (device_state_ == kDeviceStateSpeaking) {
+         AbortSpeaking(kAbortReasonWakeWordDetected);
+     } else if (device_state_ == kDeviceStateActivating) {
+@@ -702,6 +823,12 @@ void Application::SetDeviceState(DeviceState state) {
+             display->SetStatus(Lang::Strings::LISTENING);
+             display->SetEmotion("neutral");
+ 
++            // ★ 2026-10-03 提示音改为**服务端可控**：
++            //   这里原来硬播 OGG_LISTENING，导致"说完话要不要响一声"只能改固件重刷。
++            //   现在由服务端在 tts/stop 之后发 system/sound 命令（见 OnIncomingJson），
++            //   管理台勾一下就生效。想恢复自动播，把下面这行取消注释即可：
++            // audio_service_.PlaySound(Lang::Sounds::OGG_LISTENING);
++
+             // Make sure the audio processor is running
+             if (!audio_service_.IsAudioProcessorRunning()) {
+                 // Send the start listening command
+diff --git a/main/application.h b/main/application.h
+index 4fdfb99..e22f96f 100644
+--- a/main/application.h
++++ b/main/application.h
+@@ -83,6 +83,8 @@ private:
+     bool has_server_time_ = false;
+     bool aborted_ = false;
+     int clock_ticks_ = 0;
++    // 2026-10-03：后台重启后自动重连用。连续几轮（每轮 5 秒）没连上服务端
++    int server_unreachable_ticks_ = 0;
+     TaskHandle_t check_new_version_task_handle_ = nullptr;
+     TaskHandle_t main_event_loop_task_handle_ = nullptr;
+ 
+diff --git a/main/assets/lang_config.h b/main/assets/lang_config.h
+index ee3e709..70687aa 100644
+--- a/main/assets/lang_config.h
++++ b/main/assets/lang_config.h
+@@ -1,68 +1,68 @@
+ // Auto-generated language config
+-// Language: vi-VN with en-US fallback
++// Language: zh-CN with en-US fallback
+ #pragma once
+ 
+ #include <string_view>
+ 
+-#ifndef vi_vn
+-    #define vi_vn  // 預設語言
++#ifndef zh_cn
++    #define zh_cn  // 預設語言
+ #endif
+ 
+ namespace Lang {
+     // 语言元数据
+-    constexpr const char* CODE = "vi-VN";
++    constexpr const char* CODE = "zh-CN";
+ 
+     // 字符串资源 (en-US as fallback for missing keys)
+     namespace Strings {
+-        constexpr const char* ACCESS_VIA_BROWSER = " URL cấu hình: ";
+-        constexpr const char* ACTIVATION = "Kích hoạt";
+-        constexpr const char* BATTERY_CHARGING = "Đang sạc";
+-        constexpr const char* BATTERY_FULL = "Pin đầy";
+-        constexpr const char* BATTERY_LOW = "Pin yếu";
+-        constexpr const char* BATTERY_NEED_CHARGE = "Pin yếu, vui lòng sạc";
+-        constexpr const char* CHECKING_NEW_VERSION = "Đang kiểm tra phiên bản mới...";
+-        constexpr const char* CHECK_NEW_VERSION_FAILED = "Kiểm tra phiên bản mới thất bại, sẽ thử lại sau %d giây: %s";
+-        constexpr const char* CONNECTED_TO = "Đã kết nối đến ";
+-        constexpr const char* CONNECTING = "Đang kết nối...";
+-        constexpr const char* CONNECTION_SUCCESSFUL = "Kết nối thành công";
+-        constexpr const char* CONNECT_TO = "Kết nối đến ";
+-        constexpr const char* CONNECT_TO_HOTSPOT = "Điểm phát sóng: ";
+-        constexpr const char* DETECTING_MODULE = "Đang phát hiện module...";
+-        constexpr const char* DOWNLOAD_ASSETS_FAILED = "Tải xuống tài nguyên thất bại";
+-        constexpr const char* ENTERING_WIFI_CONFIG_MODE = "Đang vào chế độ cấu hình Wi-Fi...";
+-        constexpr const char* ERROR = "Lỗi";
+-        constexpr const char* FOUND_NEW_ASSETS = "Tìm thấy tài nguyên mới: %s";
+-        constexpr const char* HELLO_MY_FRIEND = "Xin chào, bạn của tôi!";
+-        constexpr const char* INFO = "Thông tin";
+-        constexpr const char* INITIALIZING = "Đang khởi tạo...";
+-        constexpr const char* LISTENING = "Đang lắng nghe...";
+-        constexpr const char* LOADING_ASSETS = "Đang tải tài nguyên...";
+-        constexpr const char* LOADING_PROTOCOL = "Đang đăng nhập...";
+-        constexpr const char* MAX_VOLUME = "Âm lượng tối đa";
+-        constexpr const char* MUTED = "Tắt tiếng";
+-        constexpr const char* NEW_VERSION = "Phiên bản mới ";
+-        constexpr const char* OTA_UPGRADE = "Nâng cấp OTA";
+-        constexpr const char* PIN_ERROR = "Vui lòng cắm thẻ SIM";
+-        constexpr const char* PLEASE_WAIT = "Vui lòng đợi...";
+-        constexpr const char* REGISTERING_NETWORK = "Đang chờ mạng...";
+-        constexpr const char* REG_ERROR = "Không thể truy cập mạng, vui lòng kiểm tra trạng thái thẻ SIM";
+-        constexpr const char* RTC_MODE_OFF = "Tắt AEC";
+-        constexpr const char* RTC_MODE_ON = "Bật AEC";
+-        constexpr const char* SCANNING_WIFI = "Đang quét Wi-Fi...";
+-        constexpr const char* SERVER_ERROR = "Gửi thất bại, vui lòng kiểm tra mạng";
+-        constexpr const char* SERVER_NOT_CONNECTED = "Không thể kết nối đến dịch vụ, vui lòng thử lại sau";
+-        constexpr const char* SERVER_NOT_FOUND = "Đang tìm dịch vụ khả dụng";
+-        constexpr const char* SERVER_TIMEOUT = "Hết thời gian chờ phản hồi";
+-        constexpr const char* SPEAKING = "Đang nói...";
+-        constexpr const char* STANDBY = "Chờ";
+-        constexpr const char* SWITCH_TO_4G_NETWORK = "Đang chuyển sang 4G...";
+-        constexpr const char* SWITCH_TO_WIFI_NETWORK = "Đang chuyển sang Wi-Fi...";
+-        constexpr const char* UPGRADE_FAILED = "Nâng cấp thất bại";
+-        constexpr const char* UPGRADING = "Hệ thống đang nâng cấp...";
+-        constexpr const char* VERSION = "Phiên bản ";
+-        constexpr const char* VOLUME = "Âm lượng ";
+-        constexpr const char* WARNING = "Cảnh báo";
+-        constexpr const char* WIFI_CONFIG_MODE = "Chế độ cấu hình Wi-Fi";
++        constexpr const char* ACCESS_VIA_BROWSER = "，浏览器访问 ";
++        constexpr const char* ACTIVATION = "激活设备";
++        constexpr const char* BATTERY_CHARGING = "正在充电";
++        constexpr const char* BATTERY_FULL = "电量已满";
++        constexpr const char* BATTERY_LOW = "电量不足";
++        constexpr const char* BATTERY_NEED_CHARGE = "电量低，请充电";
++        constexpr const char* CHECKING_NEW_VERSION = "检查新版本...";
++        constexpr const char* CHECK_NEW_VERSION_FAILED = "检查新版本失败，将在 %d 秒后重试：%s";
++        constexpr const char* CONNECTED_TO = "已连接 ";
++        constexpr const char* CONNECTING = "连接中...";
++        constexpr const char* CONNECTION_SUCCESSFUL = "Connection Successful";
++        constexpr const char* CONNECT_TO = "连接 ";
++        constexpr const char* CONNECT_TO_HOTSPOT = "手机连接热点 ";
++        constexpr const char* DETECTING_MODULE = "检测模组...";
++        constexpr const char* DOWNLOAD_ASSETS_FAILED = "下载资源失败";
++        constexpr const char* ENTERING_WIFI_CONFIG_MODE = "进入配网模式...";
++        constexpr const char* ERROR = "错误";
++        constexpr const char* FOUND_NEW_ASSETS = "发现新资源: %s";
++        constexpr const char* HELLO_MY_FRIEND = "你好，我的朋友！";
++        constexpr const char* INFO = "信息";
++        constexpr const char* INITIALIZING = "正在初始化...";
++        constexpr const char* LISTENING = "聆听中...";
++        constexpr const char* LOADING_ASSETS = "加载资源...";
++        constexpr const char* LOADING_PROTOCOL = "登录服务器...";
++        constexpr const char* MAX_VOLUME = "最大音量";
++        constexpr const char* MUTED = "已静音";
++        constexpr const char* NEW_VERSION = "新版本 ";
++        constexpr const char* OTA_UPGRADE = "OTA 升级";
++        constexpr const char* PIN_ERROR = "请插入 SIM 卡";
++        constexpr const char* PLEASE_WAIT = "请稍候...";
++        constexpr const char* REGISTERING_NETWORK = "等待网络...";
++        constexpr const char* REG_ERROR = "无法接入网络，请检查流量卡状态";
++        constexpr const char* RTC_MODE_OFF = "AEC 关闭";
++        constexpr const char* RTC_MODE_ON = "AEC 开启";
++        constexpr const char* SCANNING_WIFI = "扫描 Wi-Fi...";
++        constexpr const char* SERVER_ERROR = "发送失败，请检查网络";
++        constexpr const char* SERVER_NOT_CONNECTED = "无法连接服务，请稍后再试";
++        constexpr const char* SERVER_NOT_FOUND = "正在寻找可用服务";
++        constexpr const char* SERVER_TIMEOUT = "等待响应超时";
++        constexpr const char* SPEAKING = "说话中...";
++        constexpr const char* STANDBY = "待命";
++        constexpr const char* SWITCH_TO_4G_NETWORK = "切换到 4G...";
++        constexpr const char* SWITCH_TO_WIFI_NETWORK = "切换到 Wi-Fi...";
++        constexpr const char* UPGRADE_FAILED = "升级失败";
++        constexpr const char* UPGRADING = "正在升级系统...";
++        constexpr const char* VERSION = "版本 ";
++        constexpr const char* VOLUME = "音量 ";
++        constexpr const char* WARNING = "警告";
++        constexpr const char* WIFI_CONFIG_MODE = "配网模式";
+     }
+ 
+     // 音效资源 (en-US as fallback for missing audio files)
+@@ -180,6 +180,18 @@ namespace Lang {
+         static_cast<size_t>(ogg_popup_end - ogg_popup_start)
+         };
+ 
++        // 2026-10-03 新增：「可以说话了」提示音（150ms 单音，比 OGG_POPUP 更轻）
++        // 放在 kDeviceStateListening 时播，主人说"他说完话后要立马有个提示音，
++        // 我就知道可以说话了"——不用盯着小屏幕看。
++        // ⚠️ 必须是 Opus in Ogg 格式（PlaySound 只认 "OpusHead"），
++        //    用 OGG Vorbis 会一个字节都不播（踩过）。
++        extern const char ogg_listening_start[] asm("_binary_listening_ogg_start");
++        extern const char ogg_listening_end[] asm("_binary_listening_ogg_end");
++        static const std::string_view OGG_LISTENING {
++        static_cast<const char*>(ogg_listening_start),
++        static_cast<size_t>(ogg_listening_end - ogg_listening_start)
++        };
++
+         extern const char ogg_success_start[] asm("_binary_success_ogg_start");
+         extern const char ogg_success_end[] asm("_binary_success_ogg_end");
+         static const std::string_view OGG_SUCCESS {
+diff --git a/main/audio/audio_service.cc b/main/audio/audio_service.cc
+index c854e71..ad75832 100644
+--- a/main/audio/audio_service.cc
++++ b/main/audio/audio_service.cc
+@@ -98,6 +98,34 @@ void AudioService::Start() {
+ 
+     esp_timer_start_periodic(audio_power_timer_, 1000000);
+ 
++    // ★★ 2026-10-03 加唤醒词诊断（主人报「一直显示在聆听中、没反应」）。
++    //   那次抓串口只能看到 GestureSensor 的循环计数，**完全看不到唤醒词任务状态**，
++    //   无法区分「AFE 没在跑」和「AFE 在跑但没识别到」。
++    //   这里每 10 秒打一行：唤醒词对象在不在、事件位有没有置位、
++    //   输入任务是否活着 —— 一次抓串口就能定位到具体哪一环。
++    xTaskCreatePinnedToCore([](void* arg) {
++        AudioService* self = static_cast<AudioService*>(arg);
++        int ticks = 0;
++        while (!self->service_stopped_) {
++            vTaskDelay(pdMS_TO_TICKS(10000));
++            ticks++;
++            if (ticks % 3 != 0) continue;   // 每 30 秒打一次，别刷屏
++            bool ww_obj = (self->wake_word_ != nullptr);
++            bool running = self->IsWakeWordRunning();
++            bool proc = (self->audio_processor_ != nullptr);
++            bool bits = xEventGroupGetBits(self->event_group_);
++            ESP_LOGI(TAG,
++                     "[唤醒诊断] wake_word对象=%d 运行位=%d 音频处理=%d "
++                     "事件位=0x%x 输出开=%d 输入任务活着=%d",
++                     ww_obj ? 1 : 0, running ? 1 : 0, proc ? 1 : 0,
++                     (unsigned)bits,
++                     (self->codec_ && self->codec_->output_enabled()) ? 1 : 0,
++                     (self->audio_input_task_handle_ != nullptr) ? 1 : 0);
++        }
++        vTaskDelete(nullptr);
++    }, "ww_diag", 3072, this, 3, nullptr, 0);
++    // ↑ 优先级 3（低于音频输入任务的 7），只做日志不抢 CPU
++
+ #if CONFIG_USE_AUDIO_PROCESSOR
+     /* Start the audio input task */
+     xTaskCreatePinnedToCore([](void* arg) {
+@@ -539,7 +567,40 @@ void AudioService::SetCallbacks(AudioServiceCallbacks& callbacks) {
+     callbacks_ = callbacks;
+ }
+ 
++void AudioService::SetSoundAllowlist(const std::string_view* sounds, size_t count) {
++    sound_allowlist_.clear();
++    for (size_t i = 0; i < count; ++i) {
++        if (sounds[i].data() == nullptr || sounds[i].size() == 0) continue;
++        sound_allowlist_.emplace_back(sounds[i].data(), sounds[i].size());
++    }
++    sound_allowlist_ready_ = true;
++    ESP_LOGI(TAG, "提示音白名单已设置：%u 个音效允许播放，其余全部静音",
++             static_cast<unsigned>(sound_allowlist_.size()));
++}
++
++bool AudioService::IsSoundAllowed(const std::string_view& sound) const {
++    // 白名单未初始化时**放行全部**（保持上游默认行为，避免初始化顺序导致全哑）
++    if (!sound_allowlist_ready_) return true;
++    const char* d = sound.data();
++    size_t n = sound.size();
++    for (const auto& it : sound_allowlist_) {
++        if (it.first == d && it.second == n) return true;
++        // 兜底：同一份静态数据可能被拷贝到不同地址，比对内容（长度取较小者）
++        size_t m = it.second < n ? it.second : n;
++        if (m >= 8 && memcmp(it.first, d, m) == 0) return true;
++    }
++    return false;
++}
++
+ void AudioService::PlaySound(const std::string_view& ogg) {
++    // ★★ 2026-10-03 提示音总闸：不在白名单里的音效一律静音。
++    //   主人原话「开场提示音（B提示音）永久去掉」。
++    //   之前逐个注释调用点总会漏（success/exclamation/low_battery/按钮/激活码…），
++    //   在这里统一拦一道最省事，以后上游合代码也带不回来。
++    if (!IsSoundAllowed(ogg)) {
++        ESP_LOGD(TAG, "提示音已被白名单拦截（静音）: %u 字节", static_cast<unsigned>(ogg.size()));
++        return;
++    }
+     if (!codec_->output_enabled()) {
+         esp_timer_stop(audio_power_timer_);
+         esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
+diff --git a/main/audio/audio_service.h b/main/audio/audio_service.h
+index 41f60e7..80185b3 100644
+--- a/main/audio/audio_service.h
++++ b/main/audio/audio_service.h
+@@ -3,6 +3,9 @@
+ 
+ #include <memory>
+ #include <deque>
++#include <vector>
++#include <utility>
++#include <string_view>
+ #include <condition_variable>
+ #include <chrono>
+ #include <mutex>
+@@ -105,6 +108,14 @@ public:
+     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
+     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
+     void PlaySound(const std::string_view& sound);
++    // ★★ 2026-10-03 提示音总闸（主人要求「开场提示音永久去掉」）
++    // PlaySound() 的调用点散落在固件各处（连接成功 success、按键 success、
++    // 表情 exclamation、低电量 low_battery、激活码逐位播 0~9 …），
++    // 一个个去注释/删除总会漏，而且以后上游合并又会带回来。
++    // 所以在**最底层**做：未通过 SetSoundAllowlist() 登记的音效一律静音。
++    // 目前只放行「说完话提示音」（OGG_LISTENING），其余全部禁声。
++    void SetSoundAllowlist(const std::string_view* sounds, size_t count);
++    bool IsSoundAllowed(const std::string_view& sound) const;
+     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
+     void ResetDecoder();
+     void SetModelsList(srmodel_list_t* models_list);
+@@ -123,6 +134,11 @@ private:
+     DebugStatistics debug_statistics_;
+     srmodel_list_t* models_list_ = nullptr;
+ 
++    // ★★ 提示音白名单：只放行「说完话提示音」，其余音效一律静音。
++    // 用指针+长度比对（音效是静态嵌入的二进制，同一份数据地址相同）。
++    bool sound_allowlist_ready_ = false;
++    std::vector<std::pair<const char*, size_t>> sound_allowlist_;
++
+     EventGroupHandle_t event_group_;
+ 
+     // Audio encode / decode
+diff --git a/main/audio/processors/afe_audio_processor.cc b/main/audio/processors/afe_audio_processor.cc
+index a9145be..ddc5e8b 100644
+--- a/main/audio/processors/afe_audio_processor.cc
++++ b/main/audio/processors/afe_audio_processor.cc
+@@ -40,7 +40,13 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms, srm
+     afe_config_t* afe_config = afe_config_init(input_format.c_str(), NULL, AFE_TYPE_VC, AFE_MODE_HIGH_PERF);
+     afe_config->aec_mode = AEC_MODE_VOIP_HIGH_PERF;
+     afe_config->vad_mode = VAD_MODE_0;
+-    afe_config->vad_min_noise_ms = 100;
++    // ⚠️ 2026-10-03 主人反馈两轮：
++    //    "说话稍慢就被打断" → 100 改 800（"好一些但还是被打断"）→ 再改 1400。
++    //    关键：设备判定"说完"后会发 listen stop，服务端立刻停止识别出答案，
++    //    所以**这一层是主战场**，服务端 VAD 的 min_silence_duration_ms 是第二道保险。
++    //    调大它的代价 = 说完后要多等这么久才开始识别。
++    //      800=偏灵敏 / 1400=当前 / 2000=非常宽容（但明显感觉慢）
++    afe_config->vad_min_noise_ms = 1400;
+     if (vad_model_name != nullptr) {
+         afe_config->vad_model_name = vad_model_name;
+     }
+diff --git a/main/boards/esp32-s3n16r8-emoji/board_config.h b/main/boards/esp32-s3n16r8-emoji/board_config.h
+index 32af69a..25e004d 100644
+--- a/main/boards/esp32-s3n16r8-emoji/board_config.h
++++ b/main/boards/esp32-s3n16r8-emoji/board_config.h
+@@ -45,6 +45,11 @@
+ #define SERVO_STEP 1           // Arduino中的STEP值
+ #define SERVO_DELAY 10         // Arduino中的SERVO_DELAY值
+ 
++// 开机舵机自检：左15°→右15°→回中（约0.6s）
++//   1 = 开机做一次可见摆动（便于确认舵机通路 + 排查供电）
++//   0 = 关闭，开机只归中不出声
++#define SERVO_BOOT_SELFTEST 1
++
+ // 舵机PWM配置，参考Arduino原始代码设置
+ #define SERVO_MIN_PULSEWIDTH 500        // 最小脉宽(微秒)
+ #define SERVO_MAX_PULSEWIDTH 2500       // 最大脉宽(微秒)
+diff --git a/main/boards/esp32-s3n16r8-emoji/emoji_board.cc b/main/boards/esp32-s3n16r8-emoji/emoji_board.cc
+index b7c2d25..cea40b3 100644
+--- a/main/boards/esp32-s3n16r8-emoji/emoji_board.cc
++++ b/main/boards/esp32-s3n16r8-emoji/emoji_board.cc
+@@ -108,6 +108,13 @@ private:
+     
+     // 对话模式屏幕
+     lv_obj_t* chat_screen_ = nullptr;
++
++    // ---- 自动表情（对话模式下由 AI 情绪临时切到表情屏，静默 N 秒后自动切回）----
++    // 背景：开机默认是对话模式，表情屏只在长按 BOOT 进"表情模式"时才创建，
++    // 导致 AI 情绪动画全部因 emoji_screen_==nullptr 被静默跳过（串口刷警告）。
++    // 这里让情绪触发时自动把表情屏亮出来，看完自动回文字屏，两头都不丢。
++    bool auto_emoji_ = false;
++    lv_timer_t* auto_emoji_timer_ = nullptr;
+     
+     // 上一次处理的AI回复
+     std::string last_ai_response_;
+@@ -229,6 +236,15 @@ private:
+                 GetDisplay()->ShowNotification("对话模式");
+                 emoji_controller_->CleanupEmojiScreen();
+                 
++                // 表情屏被删了，同步复位自动表情状态，否则下次情绪触发会只创建不显示
++                {
++                    DisplayLockGuard lock(display_);
++                    auto_emoji_ = false;
++                    if (auto_emoji_timer_ != nullptr) {
++                        lv_timer_pause(auto_emoji_timer_);
++                    }
++                }
++                
+                 // 舵机回到中心位置
+                 servo_controller_->HeadCenter();
+             }
+@@ -288,6 +304,45 @@ private:
+         }
+     }
+ 
++public:
++    // 自动表情：AI 触发情绪时把表情屏临时亮出来，静默 hold_ms 后自动切回文字屏。
++    // - 手动"表情模式"（长按 BOOT）下什么都不做，避免打断。
++    // - 已亮起时只重置计时器（连续情绪不会反复切屏）。
++    void FlashEmoji(int hold_ms = 5000) {
++        if (is_emoji_mode_) return;
++        DisplayLockGuard lock(display_);
++        if (emoji_controller_->GetEmojiScreen() == nullptr) {
++            emoji_controller_->CreateEmojiScreen();
++        }
++        if (!auto_emoji_) {
++            lv_scr_load(emoji_controller_->GetEmojiScreen());
++            auto_emoji_ = true;
++            ESP_LOGI(TAG, "自动表情：切到表情屏（%d ms 后回文字屏）", hold_ms);
++        }
++        if (auto_emoji_timer_ == nullptr) {
++            auto_emoji_timer_ = lv_timer_create(EmojiBoard::OnAutoEmojiTimeout, hold_ms, this);
++        } else {
++            lv_timer_set_period(auto_emoji_timer_, hold_ms);
++        }
++        if (auto_emoji_timer_ != nullptr) {
++            lv_timer_reset(auto_emoji_timer_);
++            lv_timer_resume(auto_emoji_timer_);
++        }
++    }
++
++private:
++    // 定时器回调：在 LVGL 任务里跑，此时已持锁，不要再套 DisplayLockGuard
++    static void OnAutoEmojiTimeout(lv_timer_t* t) {
++        EmojiBoard* self = static_cast<EmojiBoard*>(lv_timer_get_user_data(t));
++        if (self == nullptr) return;
++        lv_timer_pause(t);
++        self->auto_emoji_ = false;
++        if (!self->is_emoji_mode_ && self->chat_screen_ != nullptr) {
++            lv_scr_load(self->chat_screen_);
++            ESP_LOGI(TAG, "自动表情：已回到文字屏");
++        }
++    }
++
+     // 声明静态任务函数为友元函数，使其可以访问私有成员
+     friend void StateMonitorTask(void* arg);
+ 
+@@ -309,10 +364,31 @@ public:
+         emoji_controller_ = new EmojiController(display_);
+         servo_controller_ = new ServoController();
+         
++        // ★ 开机即"创建但不显示"表情屏（根因修复，2026-10-03）：
++        //   30 个 Execute*Animation 开头都检查 emoji_screen_==nullptr 就 return，
++        //   而舵机动作 servo_controller_->HeadMove/HeadLeft... 写在 return 之后 →
++        //   表情屏不存在时，表情与舵机一起失效（同一个根因，两条命）。
++        //   这里提前把屏建好，null 检查全部通过，动画与舵机即恢复；
++        //   注意 CreateEmojiScreen() 只 new 对象、不调用 lv_scr_load()，
++        //   所以默认仍是文字屏 —— 正好是"乙方案"。
++        {
++            DisplayLockGuard lock(display_);
++            emoji_controller_->CreateEmojiScreen();
++        }
++        
++        // 随机动画触发时，把表情屏临时亮出来（"活着的桌宠"观感），随后自动回文字屏
++        emoji_controller_->SetRandomAnimationHook([this]() { FlashEmoji(2500); });
++        
+         // 初始化控制器
+         emoji_controller_->Initialize();
+         servo_controller_->Initialize();
+-        
++
++#if SERVO_BOOT_SELFTEST
++        // 开机可见摆动：既是"桌宠活着的观感"，也是排查舵机供电的最快手段。
++        // 关掉它只需把 board_config.h 里的 SERVO_BOOT_SELFTEST 改成 0。
++        servo_controller_->SelfTest();
++#endif
++
+         // 设置表情控制器的舵机控制器
+         emoji_controller_->SetServoController(servo_controller_);
+         
+@@ -766,6 +842,11 @@ void EmojiDisplay::SetEmotion(const char* emotion) {
+         
+         ESP_LOGI(TAG, "映射到我们的表情动作: %s", mapped_emotion.c_str());
+         
++        // 对话模式下自动把表情屏亮出来（中性表情除外，避免无谓切屏）
++        if (board_ != nullptr && mapped_emotion != "neutral") {
++            board_->FlashEmoji();
++        }
++        
+         // 创建一个单独的任务来执行表情动作，避免阻塞主线程
+         // 复制表情字符串，因为它将在任务中使用
+         char* emotion_copy = strdup(mapped_emotion.c_str());
+diff --git a/main/boards/esp32-s3n16r8-emoji/emoji_controller.cc b/main/boards/esp32-s3n16r8-emoji/emoji_controller.cc
+index 4cb6d73..5ff82b3 100644
+--- a/main/boards/esp32-s3n16r8-emoji/emoji_controller.cc
++++ b/main/boards/esp32-s3n16r8-emoji/emoji_controller.cc
+@@ -38,7 +38,15 @@ void EmojiController::Initialize() {
+     BaseType_t task_created = xTaskCreate(
+         AnimationTask,    // 任务函数
+         "AnimationTask",  // 任务名称
+-        4096,            // 堆栈大小
++        // ⚠️⚠️ 2026-10-03 血泪×2：原来 4096 会在「执行惊讶表情动画」里栈溢出 → Rebooting，
++        //    表现为「主动播报没声音 + 设备隔几分钟重连一次（其实是重启）」。
++        //    第一次改到 10240，**仍然溢出**（01:57 采集的 serial_final.log 里
++        //    `ELF file SHA256: a8204da07` 就是 10240 版本，照样
++        //    `A stack overflow in task AnimationTask has been detected`）。
++        //    原因：ExecuteSurpriseAnimation 里调 `lv_refr_now(NULL)` 做同步全树刷新，
++        //    这条 LVGL 9.3 调用链比预想的深得多。直接给到 16KB。
++        //    改完务必 `grep 16384` 确认两处（这里 + 重建任务的那个分支）都改到。
++        16384,           // 堆栈大小
+         this,            // 任务参数
+         5,               // 任务优先级
+         &animation_task_handle_  // 任务句柄
+@@ -52,7 +60,7 @@ void EmojiController::Initialize() {
+     task_created = xTaskCreate(
+         AnimationTimerTask,        // 任务函数
+         "AnimationTimerTask",      // 任务名称
+-        4096,                      // 堆栈大小
++        6144,                      // 堆栈大小（原 4096，一并放宽）
+         this,                      // 任务参数
+         5,                         // 任务优先级
+         &animation_timer_task_handle_       // 任务句柄
+@@ -673,6 +681,11 @@ void EmojiController::ExecuteRandomAnimation() {
+     AnimationType type = SelectRandomAnimation();
+     ESP_LOGI(TAG, "执行随机动画，类型: %d", static_cast<int>(type));
+     
++    // 通知板级：随机动画开始 → 把表情屏临时亮出来（乙方案下默认是文字屏）
++    if (random_animation_hook_) {
++        random_animation_hook_();
++    }
++    
+     // 检查屏幕和眼睛对象是否存在
+     if (emoji_screen_ == nullptr || left_eye_ == nullptr || right_eye_ == nullptr) {
+         ESP_LOGW(TAG, "ExecuteRandomAnimation: 屏幕或眼睛对象不存在");
+@@ -3180,7 +3193,7 @@ void EmojiController::InitEmoji() {
+         BaseType_t task_created = xTaskCreate(
+             AnimationTask,
+             "AnimationTask",
+-            4096,
++            16384,   // 与 Initialize() 保持一致，避免走这条路径时仍然溢出
+             this,
+             5,
+             &animation_task_handle_
+@@ -3196,7 +3209,7 @@ void EmojiController::InitEmoji() {
+         BaseType_t task_created = xTaskCreate(
+             AnimationTimerTask,
+             "AnimationTimerTask",
+-            4096,
++            6144,
+             this,
+             5,
+             &animation_timer_task_handle_);
+@@ -3516,5 +3529,11 @@ void EmojiController::ExecuteCryAnimation() {
+ 
+ // 暂停LVGL任务（空实现，防止链接错误）
+ void EmojiController::SuspendLVGLTask() {
+-    // TODO: 实现暂停LVGL任务的逻辑
++    // 2026-10-03 结论：本函数【有意】保持 no-op。
++    // - 上游原本是 TODO；而 ResumeLVGLTask() 只在 lvgl_task_suspended_ 为真时才恢复优先级，
++    //   当前该标志永远为假 → 两者实际都是 no-op，不存在"暂停了恢复不回来"的风险。
++    // - 动画期间把 LVGL 任务降优先级，反而会让眼睛刷新变慢（动画卡顿），且依赖任务名
++    //   "taskLVGL" 查找——一旦任务改名就会永久降级。收益为负，故不做。
++    // - 真正解决"看门狗/冻结"的是 oled_display.cc 里注册的 lv_display_set_flush_wait_cb。
++    // 结论：保持空实现是刻意设计，非缺陷。
+ }
+diff --git a/main/boards/esp32-s3n16r8-emoji/emoji_controller.h b/main/boards/esp32-s3n16r8-emoji/emoji_controller.h
+index d00a8ca..ca06d0c 100644
+--- a/main/boards/esp32-s3n16r8-emoji/emoji_controller.h
++++ b/main/boards/esp32-s3n16r8-emoji/emoji_controller.h
+@@ -235,6 +235,14 @@ public:
+         servo_controller_ = servo_controller;
+     }
+     
++    /**
++     * @brief 设置"随机动画触发"回调（板级注入，用于把表情屏临时亮出来）
++     *        注意：回调在动画任务上下文中执行，内部不可再长期持锁。
++     */
++    void SetRandomAnimationHook(std::function<void()> hook) {
++        random_animation_hook_ = hook;
++    }
++    
+     /**
+      * @brief 获取表情屏幕
+      * @return LVGL屏幕对象
+@@ -309,6 +317,9 @@ private:
+     // 动画执行标志，用于防止多个动画同时执行
+     bool is_animating_ = false;
+     
++    // 随机动画触发回调（板级注入，用于把表情屏临时亮出来）
++    std::function<void()> random_animation_hook_ = nullptr;
++    
+     // LVGL任务控制
+     bool lvgl_task_suspended_ = false;
+     UBaseType_t saved_lvgl_task_priority_ = 0;
+diff --git a/main/boards/esp32-s3n16r8-emoji/gesture_sensor.cc b/main/boards/esp32-s3n16r8-emoji/gesture_sensor.cc
+index 76a8074..1f98d40 100644
+--- a/main/boards/esp32-s3n16r8-emoji/gesture_sensor.cc
++++ b/main/boards/esp32-s3n16r8-emoji/gesture_sensor.cc
+@@ -846,6 +846,12 @@ void GestureSensor::GestureTaskFunction(void* pvParameters) {
+             
+             // 立即处理手势，无需额外延迟
+             sensor->ProcessGesture(gesture);
++
++            // ★ 连续手势识别：连续左右摆动→摇头，连续上下摆动→点头。
++            //   注意：这个函数以前只有定义、全工程没有任何调用点，
++            //   属于彻底的死代码 —— 这正是"左右/上下摇摆不生效"的根因（2026-10-03）。
++            sensor->CheckSequentialGestures(gesture);
++
+             success_count++;
+             
+             // 手势处理后的短暂延迟，防止重复触发
+diff --git a/main/boards/esp32-s3n16r8-emoji/servo_controller.cc b/main/boards/esp32-s3n16r8-emoji/servo_controller.cc
+index 34d02d3..33382b0 100644
+--- a/main/boards/esp32-s3n16r8-emoji/servo_controller.cc
++++ b/main/boards/esp32-s3n16r8-emoji/servo_controller.cc
+@@ -15,6 +15,10 @@ ServoController::~ServoController() {
+ }
+ 
+ void ServoController::Initialize() {
++    ESP_LOGI(TAG, "舵机初始化：水平=GPIO%d(通道0) 垂直=GPIO%d(通道1)，%dHz，脉宽 %d-%dus",
++             (int)servo_pins[0], (int)servo_pins[1], LEDC_FREQUENCY,
++             SERVO_MIN_PULSEWIDTH, SERVO_MAX_PULSEWIDTH);
++
+     // 配置LEDC定时器
+     ledc_timer_config_t ledc_timer = {
+         .speed_mode = LEDC_MODE,
+@@ -42,8 +46,23 @@ void ServoController::Initialize() {
+     // 设置舵机初始位置
+     SetServoAngle(0, SERVO_CENTER_X);
+     SetServoAngle(1, SERVO_CENTER_Y);
++    ESP_LOGI(TAG, "舵机已归中：水平=%d° 垂直=%d°（若此前不在中位，这一刻会看到舵机动一下）",
++             current_x_angle_, current_y_angle_);
+ }
+ 
++void ServoController::SelfTest() {
++    // 开机可见动作：左 15° → 右 15° → 回中，全程约 0.6s。
++    // 作用有两个：① 让主人一眼确认"舵机是活的"；
++    //            ② 排查供电 —— 肉眼看不动但日志正常，基本就是舵机 5V 供电不够。
++    ESP_LOGI(TAG, "舵机自检开始：左15° -> 右15° -> 回中");
++    HeadLeft(15);
++    HeadRight(15);
++    HeadCenter();
++    ESP_LOGI(TAG, "舵机自检结束（水平=%d° 垂直=%d°）。若肉眼看不动，请查舵机 5V 供电/接线",
++             current_x_angle_, current_y_angle_);
++}
++
++
+ void ServoController::SetServoAngle(int channel, int angle) {
+     // 限制角度范围
+     if (channel == 0) { // 水平舵机
+diff --git a/main/boards/esp32-s3n16r8-emoji/servo_controller.h b/main/boards/esp32-s3n16r8-emoji/servo_controller.h
+index 069fc5b..bc9019f 100644
+--- a/main/boards/esp32-s3n16r8-emoji/servo_controller.h
++++ b/main/boards/esp32-s3n16r8-emoji/servo_controller.h
+@@ -41,6 +41,14 @@ public:
+      * @brief 初始化舵机控制器
+      */
+     void Initialize();
++
++    /**
++     * @brief 开机自检：左 15° → 右 15° → 回中（约 0.6s）
++     *
++     * 让主人一眼看到"舵机是活的"，同时用于排查舵机供电是否足够。
++     * 是否调用由 board_config.h 的 SERVO_BOOT_SELFTEST 控制。
++     */
++    void SelfTest();
+     
+     /**
+      * @brief 设置舵机角度
+diff --git a/main/display/oled_display.cc b/main/display/oled_display.cc
+index 66dee40..c433775 100644
+--- a/main/display/oled_display.cc
++++ b/main/display/oled_display.cc
+@@ -11,6 +11,9 @@
+ #include <esp_lvgl_port.h>
+ #include <font_awesome.h>
+ 
++#include <freertos/FreeRTOS.h>
++#include <freertos/task.h>
++
+ #define TAG "OledDisplay"
+ 
+ LV_FONT_DECLARE(LVGL_TEXT_FONT);
+@@ -76,6 +79,28 @@ OledDisplay::OledDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handl
+         return;
+     }
+ 
++    /* ---------------------------------------------------------------------
++     * 【冻结修复 2026-10-02】
++     * 本板屏幕是 I2C 的 SSD1306，和手势传感器 PAJ7620 共用一条 I2C 总线。
++     * esp_lvgl_port 对非 RGB/DSI 屏**不会**在 flush 回调里调用 flush_ready，
++     * 而是依赖 panel_io 的 on_color_trans_done 回调。该回调在 I2C 忙
++     * （例如被优先级 7 的手势任务占用）或超时失败时不会触发，而
++     * lvgl_port_flush_callback 又没检查 draw_bitmap 的返回值。
++     *
++     * LVGL 9.3 的 wait_for_flushing() 在 flush_wait_cb == NULL 时执行
++     *     while(disp->flushing);          // 无 delay、不让出 CPU 的裸忙等
++     * 于是 LVGL 任务（优先级 1，绑定 CPU1）原地空转占满 CPU1，同核 IDLE1
++     * （优先级 0）永远得不到调度 -> Task WDT 触发 -> 整个 UI 冻结（表现为
++     * 屏幕卡在"说话中"，但语音链路其实还活着）。
++     *
++     * 注册 flush_wait_cb 后 LVGL 改走另一分支：等待期间主动让出 CPU，并在
++     * 回调返回后强制清零 flushing 计数。这样即使完成回调丢失也不会死锁，
++     * 最坏只丢一帧画面。
++     * ------------------------------------------------------------------- */
++    lv_display_set_flush_wait_cb(display_, [](lv_display_t *disp) {
++        vTaskDelay(pdMS_TO_TICKS(1));
++    });
++
+     if (height_ == 64) {
+         SetupUI_128x64();
+     } else {
+diff --git a/main/protocols/protocol.cc b/main/protocols/protocol.cc
+index 470cc91..b6eadca 100644
+--- a/main/protocols/protocol.cc
++++ b/main/protocols/protocol.cc
+@@ -79,7 +79,14 @@ void Protocol::SendMcpMessage(const std::string& payload) {
+ }
+ 
+ bool Protocol::IsTimeout() const {
+-    const int kTimeoutSeconds = 120;
++    // ★ 本地改造（2026-10-02）——原值 120
++    //   原逻辑：设备连续 120 秒没收到服务端数据，就认为音频通道已超时
++    //   （IsAudioChannelOpened() 里带 !IsTimeout()，超时即视为"没连上"）。
++    //   问题：本机把设备改成"桌面常供电、保持长连接"的形态后，服务端在空闲时
++    //   并不会持续下发数据，于是 120 秒必然误判为超时 → 通道被认为断了。
++    //   实测证据：对话结束后约 108~120 秒，服务端即收到 ConnectionClosed。
++    //   改为 1 小时，让空闲期不误判；真正的断线仍由 websocket 的 OnDisconnected 兜底。
++    const int kTimeoutSeconds = 3600;
+     auto now = std::chrono::steady_clock::now();
+     auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - last_incoming_time_);
+     bool timeout = duration.count() > kTimeoutSeconds;
+diff --git a/main/protocols/websocket_protocol.cc b/main/protocols/websocket_protocol.cc
+index d4f435c..a065cb4 100644
+--- a/main/protocols/websocket_protocol.cc
++++ b/main/protocols/websocket_protocol.cc
+@@ -166,6 +166,12 @@ bool WebsocketProtocol::OpenAudioChannel() {
+ 
+     websocket_->OnDisconnected([this]() {
+         ESP_LOGI(TAG, "Websocket disconnected");
++        // ⚠️ 这里**不要**自己造 json 消息去清屏（比如发个 clear_chat_message）：
++        //   application.cc 只认 tts/stt/llm/mcp/system/alert 几种 type，
++        //   自造 type 会落到 "Missing message type" 或静默丢弃，等于白写。
++        //   正确做法：断线的正规回调就是 on_audio_channel_closed_，
++        //   application.cc:445-451 已在里面做 display->SetChatMessage("system","")
++        //   + SetDeviceState(kIdle)，残留文案会随之清掉。
+         if (on_audio_channel_closed_ != nullptr) {
+             on_audio_channel_closed_();
+         }
+@@ -192,6 +198,28 @@ bool WebsocketProtocol::OpenAudioChannel() {
+         return false;
+     }
+ 
++    // ★ 本地修复（2026-10-03 19:20）：补上 on_connected_ 回调调用
++    //
++    // 现象：后台重启后，屏幕一直显示 Alert 弹出的"无法连接服务，请稍后再试"，
++    //       即使 WebSocket 其实已经连上了（服务端日志能看到设备上线），
++    //       且不唤醒小智就永远擦不掉，一唤醒就恢复。
++    //
++    // 根因（已对照上游 HEAD 确认，非我们改坏）：
++    //   `Application::DismissAlert()`（清掉错误提示、恢复 STANDBY）**只在**
++    //   `protocol_->OnConnected(...)` 回调里被调用（application.cc:425）。
++    //   而 `Protocol::OnConnected` 注册的 `on_connected_`，**MQTT 实现会调用**
++    //   （mqtt_protocol.cc:86-88），**WebSocket 实现从不调用** —— 全文件搜不到。
++    //   → 走 WS 的设备永远收不到"已连接"通知 → 错误提示永久驻留。
++    //
++    // 为什么放在 on_audio_channel_opened_ 之前：
++    //   这里正好是 WS 链路上"连接已建立、服务端 hello 已收到"的确定时刻，
++    //   与 MQTT 版触发 on_connected_ 的语义等价，**不改变任何状态机逻辑**，
++    //   只是把上游漏掉的通知补上。失败路径（上面两处 SetError）不会走到这里，
++    //   所以不会误报"已连接"。
++    if (on_connected_ != nullptr) {
++        on_connected_();
++    }
++
+     if (on_audio_channel_opened_ != nullptr) {
+         on_audio_channel_opened_();
+     }

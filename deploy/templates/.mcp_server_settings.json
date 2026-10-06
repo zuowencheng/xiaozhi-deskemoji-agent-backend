@@ -1,0 +1,35 @@
+{
+  "_readme": [
+    "MCP 配置模板。部署时复制到 server/xiaozhi-server/data/.mcp_server_settings.json 再改路径。",
+    "★ 该文件含本机绝对路径和可能的 key，交付给别人必须按 deploy/README.md 的清单改一遍"
+  ],
+  "mcpServers": {
+    "xiaozhi-local": {
+      "command": "<改成你的 venv python.exe 绝对路径>",
+      "args": ["<改成 xiaozhi-deskemoji-agent/bridge/tools/local_mcp.py 的绝对路径>"],
+      "des": "自研本机 MCP：文件读写/列目录/搜文件/内容搜索/抓网页/跑命令/时间"
+    }
+  },
+  "_disabled": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "<允许的目录1>", "<允许的目录2>"],
+      "des": "官方文件读写，需先装 npm 依赖"
+    },
+    "windows-cli": {
+      "command": "npx",
+      "args": ["-y", "@simonb97/server-win-cli"],
+      "des": "命令行执行，需先装 npm 依赖；与自研 run_shell 重叠"
+    },
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "des": "与自研 memory_tools 重叠，不要同时开"
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@executeautomation/playwright-mcp-server"],
+      "des": "浏览器自动化，需额外 npx playwright install"
+    }
+  }
+}

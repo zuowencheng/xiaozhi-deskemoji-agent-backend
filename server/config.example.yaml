@@ -1,0 +1,81 @@
+# ============================================================
+#  小智自建后台 · 本机私有配置模板
+#  用法：复制为 server/xiaozhi-server/data/.config.yaml
+#        （data/ 已被 .gitignore 排除，密钥不会进仓库）
+#  原理：上游项目优先读取 data/.config.yaml，缺失项回落到 config.yaml
+# ============================================================
+
+# ---------- 服务基本配置 ----------
+server:
+  ip: 0.0.0.0
+  port: 8000          # WebSocket 端口：ws://<本机IP>:8000/xiaozhi/v1/
+  http_port: 8003     # OTA 与视觉分析接口
+  auth:
+    enabled: false    # 局域网自用建议先关；需要鉴权时改 true 并填 allowed_devices
+    allowed_devices:
+      - "84:c7:bb:58:17:44"   # 你的 deskemoji MAC（实测值）
+
+# ---------- 模块选择 ----------
+selected_module:
+  VAD: SileroVAD     # 本地，不出网
+  # ASR 二选一：
+  #   SherpaASR  = 本地模型，完全离线（需先跑 tools/fetch_sherpa_model.py）
+  #   DoubaoASR  = 火山引擎，需 appid + access_token
+  ASR: DoubaoASR
+  # LLM 二选一：
+  #   OllamaLLM = 本机 Ollama（qwen3:4b），完全离线
+  #   DoubaoLLM = 火山引擎，免费 50 万 token，function_call 更稳
+  LLM: OllamaLLM
+  VLLM: ChatGLMVLLM
+  TTS: EdgeTTS       # 微软 Edge 在线合成，免费、无需 Key
+  Memory: nomem      # 记忆由我们的 bridge/memory.py 承担，服务端先关
+  Intent: function_call
+
+# ---------- ASR ----------
+ASR:
+  DoubaoASR:
+    type: doubao
+    appid: 你的火山appid
+    access_token: 你的火山access_token
+    cluster: volcengine_input_common
+    output_dir: tmp/
+  SherpaASR:
+    type: sherpa_onnx_local
+    model_dir: models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17
+    output_dir: tmp/
+    model_type: sense_voice
+
+# ---------- LLM ----------
+LLM:
+  OllamaLLM:
+    type: ollama
+    model_name: qwen3:4b
+    base_url: http://localhost:11434
+  # 也可以走 OpenAI 兼容端点，工具调用更稳：
+  OllamaOpenAI:
+    type: openai
+    model_name: qwen3:4b
+    base_url: http://localhost:11434/v1
+    api_key: ollama
+    temperature: 0.7
+    max_tokens: 500
+  DoubaoLLM:
+    type: openai
+    base_url: https://ark.cn-beijing.volces.com/api/v3
+    model_name: doubao-seed-2-0-lite-260215
+    api_key: 你的doubao key
+
+# ---------- TTS ----------
+TTS:
+  EdgeTTS:
+    type: edge
+    voice: zh-CN-XiaoxiaoNeural
+    output_dir: tmp/
+
+# ---------- MCP 接入点（沿用现有本机桥） ----------
+# 自建后台同样支持 mcp_endpoint，填你现在 xiaozhi.me 那个地址即可继续用本机桥；
+# 等我们自己的主动回执做完后，这一项可以删掉。
+mcp_endpoint: wss://api.xiaozhi.me/mcp/?token=你的token
+
+# ---------- 关闭智控台 ----------
+read_config_from_api: false
