@@ -70,3 +70,6 @@ _download/
 
 # WorkBuddy 工具链目录（记忆/技能，非项目资产）
 .workbuddy/
+
+# 运行时数据
+bridge/quota.json

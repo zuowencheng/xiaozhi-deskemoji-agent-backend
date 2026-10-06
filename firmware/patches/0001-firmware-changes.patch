@@ -1,5 +1,50 @@
+warning: in the working copy of 'sdkconfig.defaults', LF will be replaced by CRLF the next time Git touches it
+diff --git a/dependencies.lock b/dependencies.lock
+index 0922260..d5e126d 100644
+--- a/dependencies.lock
++++ b/dependencies.lock
+@@ -537,7 +537,7 @@ dependencies:
+   idf:
+     source:
+       type: idf
+-    version: 5.4.2
++    version: 5.5.4
+   lvgl/lvgl:
+     component_hash: b702d642e03e95928046d5c6726558e6444e112420c77efa5fdb6650b0a13c5d
+     dependencies: []
+diff --git a/main/Kconfig.projbuild b/main/Kconfig.projbuild
+index bcdbd7f..3028658 100644
+--- a/main/Kconfig.projbuild
++++ b/main/Kconfig.projbuild
+@@ -595,4 +595,25 @@ menu "TAIJIPAI_S3_CONFIG"
+         启动双声道
+ endmenu
+ 
++endmenu
++
++# ---------------------------------------------------------------------------
++# 本地调参区（2026-10-05）
++# 目的：把「我们自己试出来的参数」从源码里挪到 Kconfig，
++#       这样 fork 里就不再有这类纯调参的源码改动，压薄 patch 面。
++#       调参只改 sdkconfig，源码保持与上游一致。
++# ---------------------------------------------------------------------------
++menu "LOCAL_TUNING"
++
++    config VAD_MIN_NOISE_MS
++        int "AFE VAD 最小噪声时长(ms)：判定用户「说完了」的容忍度"
++        default 1400
++        range 100 3000
++        help
++            设备判定「用户说完了」之前允许的最短噪声时长。
++            设备判定说完后会发 listen stop，服务端立刻停止识别并出答案，
++            所以**这一层是主战场**，服务端 VAD 的 min_silence_duration_ms 是第二道保险。
++            调大的代价 = 说完后要多等这么久才开始识别。
++            建议区间：800(偏灵敏) / 1400(默认) / 2000(非常宽容，但明显感觉慢)。
++
+ endmenu
+\ No newline at end of file
 diff --git a/main/application.cc b/main/application.cc
-index b2381d8..96476dc 100644
+index b2381d8..856d2b4 100644
 --- a/main/application.cc
 +++ b/main/application.cc
 @@ -363,6 +363,18 @@ void Application::Start() {
@@ -21,7 +66,39 @@ index b2381d8..96476dc 100644
      audio_service_.Start();
  
      AudioServiceCallbacks callbacks;
-@@ -498,6 +510,28 @@ void Application::Start() {
+@@ -447,17 +459,30 @@ void Application::Start() {
+                 Schedule([this]() {
+                     aborted_ = false;
+                     if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
++                        // ★ 2026-10-05 记录这次「说话」是怎么来的：
++                        //   说话前是 idle ⇒ 用户没开口，是服务端推的**主动播报**；
++                        //   说话前是 listening ⇒ 用户刚说完话，是正常对话的回复。
++                        //   ★ 必须在 SetDeviceState 之前判断，否则状态已经被改掉了。
++                        speaking_from_idle_ = (device_state_ == kDeviceStateIdle);
+                         SetDeviceState(kDeviceStateSpeaking);
+                     }
+                 });
+             } else if (strcmp(state->valuestring, "stop") == 0) {
+                 Schedule([this]() {
+                     if (device_state_ == kDeviceStateSpeaking) {
+-                        if (listening_mode_ == kListeningModeManualStop) {
++                        // ★ 2026-10-05 主动播报播完 → 回**待命**，不要再回聆听。
++                        //   原上游行为：AutoStop 模式下一律回聆听。这对「用户说话→回复」是对的（要多轮对话），
++                        //   但对「服务端主动推的播报」是错的：用户根本没开口，播完却把麦克风一直开着，
++                        //   屏幕一直显示聆听中，环境噪声还会触发识别 —— 费电也费钱。
++                        //   ★ 只改主动播报这条路径，正常对话的多轮体验完全不变。
++                        if (listening_mode_ == kListeningModeManualStop || speaking_from_idle_) {
++                            ESP_LOGI(TAG, "TTS stop: %s，回到待机",
++                                     speaking_from_idle_ ? "主动播报结束" : "ManualStop 模式");
+                             SetDeviceState(kDeviceStateIdle);
+                         } else {
+                             SetDeviceState(kDeviceStateListening);
+                         }
++                        speaking_from_idle_ = false;
+                     }
+                 });
+             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
+@@ -498,6 +523,28 @@ void Application::Start() {
                      Schedule([this]() {
                          Reboot();
                      });
@@ -50,7 +127,7 @@ index b2381d8..96476dc 100644
                  } else {
                      ESP_LOGW(TAG, "Unknown system command: %s", command->valuestring);
                  }
-@@ -507,7 +541,10 @@ void Application::Start() {
+@@ -507,7 +554,10 @@ void Application::Start() {
              auto message = cJSON_GetObjectItem(root, "message");
              auto emotion = cJSON_GetObjectItem(root, "emotion");
              if (cJSON_IsString(status) && cJSON_IsString(message) && cJSON_IsString(emotion)) {
@@ -62,7 +139,7 @@ index b2381d8..96476dc 100644
              } else {
                  ESP_LOGW(TAG, "Alert command requires status, message and emotion");
              }
-@@ -537,8 +574,10 @@ void Application::Start() {
+@@ -537,8 +587,10 @@ void Application::Start() {
          std::string message = std::string(Lang::Strings::VERSION) + ota.GetCurrentVersion();
          display->ShowNotification(message.c_str());
          display->SetChatMessage("system", "");
@@ -75,7 +152,36 @@ index b2381d8..96476dc 100644
      }
  
      // Start the main event loop task with priority 3
-@@ -613,6 +652,72 @@ void Application::MainEventLoop() {
+@@ -606,6 +658,28 @@ void Application::MainEventLoop() {
+             clock_ticks_++;
+             auto display = Board::GetInstance().GetDisplay();
+             display->UpdateStatusBar();
++
++            // ★★ 2026-10-04 聆听超时（主人：别一直挂在「聆听中」，费电也费钱）
++            // 根因：上游在 AutoStop 模式下 tts/stop 之后**一律回 kDeviceStateListening**
++            //   （下面 SetDeviceState 里 tts/stop 那段，git diff 确认是上游原版、非本地改动），
++            //   而本板 AFE 没有"语音说完就自动停止聆听"的逻辑，于是只要你不再开口，
++            //   它就永远停在聆听中 —— 麦克风一直开、屏幕一直显示聆听、环境噪声随时触发识别。
++            // 处理：连续 N 秒听不到声音就回待机（唤醒词检测随之恢复）。
++            //   ★ N 秒从服务端 hello 下发（后台可调，默认 180），0 或负数 = 永不超时。
++            //   ★ 有声音立即清零，所以**不会掐断你正在说的话**；
++            //     超时后想继续聊，说句唤醒词即可（本来也要说）。
++            if (device_state_ == kDeviceStateListening) {
++                if (audio_service_.IsVoiceDetected()) {
++                    listening_silent_ticks_ = 0;
++                } else {
++                    listening_silent_ticks_++;
++                    int limit = protocol_ ? protocol_->listening_timeout_sec() : 180;
++                    if (limit > 0 && listening_silent_ticks_ >= limit) {
++                        ESP_LOGI(TAG, "Listening: 连续 %d 秒没听到声音，回到待机", limit);
++                        SetDeviceState(kDeviceStateIdle);
++                    }
++                }
++            }
+         
+             // Print the debug info every 10 seconds
+             if (clock_ticks_ % 10 == 0) {
+@@ -613,6 +687,72 @@ void Application::MainEventLoop() {
                  // SystemInfo::PrintTaskList();
                  SystemInfo::PrintHeapStats();
              }
@@ -148,7 +254,7 @@ index b2381d8..96476dc 100644
          }
      }
  }
-@@ -645,9 +750,25 @@ void Application::OnWakeWordDetected() {
+@@ -645,9 +785,25 @@ void Application::OnWakeWordDetected() {
          SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
  #else
          SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
@@ -176,32 +282,45 @@ index b2381d8..96476dc 100644
      } else if (device_state_ == kDeviceStateSpeaking) {
          AbortSpeaking(kAbortReasonWakeWordDetected);
      } else if (device_state_ == kDeviceStateActivating) {
-@@ -702,6 +823,12 @@ void Application::SetDeviceState(DeviceState state) {
+@@ -701,6 +857,14 @@ void Application::SetDeviceState(DeviceState state) {
+         case kDeviceStateListening:
              display->SetStatus(Lang::Strings::LISTENING);
              display->SetEmotion("neutral");
- 
++            // 进入聆听 → 静默计数从头开始（配合上面 CLOCK_TICK 的超时）
++            listening_silent_ticks_ = 0;
++
 +            // ★ 2026-10-03 提示音改为**服务端可控**：
 +            //   这里原来硬播 OGG_LISTENING，导致"说完话要不要响一声"只能改固件重刷。
 +            //   现在由服务端在 tts/stop 之后发 system/sound 命令（见 OnIncomingJson），
 +            //   管理台勾一下就生效。想恢复自动播，把下面这行取消注释即可：
 +            // audio_service_.PlaySound(Lang::Sounds::OGG_LISTENING);
-+
+ 
              // Make sure the audio processor is running
              if (!audio_service_.IsAudioProcessorRunning()) {
-                 // Send the start listening command
 diff --git a/main/application.h b/main/application.h
-index 4fdfb99..e22f96f 100644
+index 4fdfb99..c9b6163 100644
 --- a/main/application.h
 +++ b/main/application.h
-@@ -83,6 +83,8 @@ private:
+@@ -83,6 +83,16 @@ private:
      bool has_server_time_ = false;
      bool aborted_ = false;
      int clock_ticks_ = 0;
 +    // 2026-10-03：后台重启后自动重连用。连续几轮（每轮 5 秒）没连上服务端
 +    int server_unreachable_ticks_ = 0;
++    // 2026-10-04：处于「聆听中」且**连续听不到声音**的秒数（CLOCK_TICK 每秒累加）。
++    //   有声音就清零，所以绝不会把人正在说的话掐断。
++    int listening_silent_ticks_ = 0;
++    // 2026-10-05：本次「说话」是不是**设备主动播报**（服务端推的，用户没开口）。
++    //   判据：进 speaking 之前设备处于 idle → 说明不是对话，是主动播报。
++    //   主动播报播完应该回待命，而不是像对话那样回聆听
++    //   （否则设备会一直挂在聆听中：麦克风常开、屏幕常亮、环境噪声随时触发识别，费电也费钱）。
++    bool speaking_from_idle_ = false;
      TaskHandle_t check_new_version_task_handle_ = nullptr;
      TaskHandle_t main_event_loop_task_handle_ = nullptr;
  
+diff --git a/main/assets/common/popup.ogg b/main/assets/common/popup.ogg
+index ea73b6f..4e8e7a7 100644
+Binary files a/main/assets/common/popup.ogg and b/main/assets/common/popup.ogg differ
 diff --git a/main/assets/lang_config.h b/main/assets/lang_config.h
 index ee3e709..70687aa 100644
 --- a/main/assets/lang_config.h
@@ -348,45 +467,21 @@ index ee3e709..70687aa 100644
          extern const char ogg_success_end[] asm("_binary_success_ogg_end");
          static const std::string_view OGG_SUCCESS {
 diff --git a/main/audio/audio_service.cc b/main/audio/audio_service.cc
-index c854e71..ad75832 100644
+index c854e71..ea99bfa 100644
 --- a/main/audio/audio_service.cc
 +++ b/main/audio/audio_service.cc
-@@ -98,6 +98,34 @@ void AudioService::Start() {
+@@ -98,6 +98,10 @@ void AudioService::Start() {
  
      esp_timer_start_periodic(audio_power_timer_, 1000000);
  
-+    // ★★ 2026-10-03 加唤醒词诊断（主人报「一直显示在聆听中、没反应」）。
-+    //   那次抓串口只能看到 GestureSensor 的循环计数，**完全看不到唤醒词任务状态**，
-+    //   无法区分「AFE 没在跑」和「AFE 在跑但没识别到」。
-+    //   这里每 10 秒打一行：唤醒词对象在不在、事件位有没有置位、
-+    //   输入任务是否活着 —— 一次抓串口就能定位到具体哪一环。
-+    xTaskCreatePinnedToCore([](void* arg) {
-+        AudioService* self = static_cast<AudioService*>(arg);
-+        int ticks = 0;
-+        while (!self->service_stopped_) {
-+            vTaskDelay(pdMS_TO_TICKS(10000));
-+            ticks++;
-+            if (ticks % 3 != 0) continue;   // 每 30 秒打一次，别刷屏
-+            bool ww_obj = (self->wake_word_ != nullptr);
-+            bool running = self->IsWakeWordRunning();
-+            bool proc = (self->audio_processor_ != nullptr);
-+            bool bits = xEventGroupGetBits(self->event_group_);
-+            ESP_LOGI(TAG,
-+                     "[唤醒诊断] wake_word对象=%d 运行位=%d 音频处理=%d "
-+                     "事件位=0x%x 输出开=%d 输入任务活着=%d",
-+                     ww_obj ? 1 : 0, running ? 1 : 0, proc ? 1 : 0,
-+                     (unsigned)bits,
-+                     (self->codec_ && self->codec_->output_enabled()) ? 1 : 0,
-+                     (self->audio_input_task_handle_ != nullptr) ? 1 : 0);
-+        }
-+        vTaskDelete(nullptr);
-+    }, "ww_diag", 3072, this, 3, nullptr, 0);
-+    // ↑ 优先级 3（低于音频输入任务的 7），只做日志不抢 CPU
++    // （2026-10-05 已删除：这里原来有一个每 30 秒打印唤醒词状态的诊断任务，
++    //  是排查「一直显示在聆听中」时临时加的。它已完成使命，删掉以压薄 fork。
++    //  将来再需要诊断可从 git 历史找回：见 commit 2026-10-03 / 关键词 "ww_diag"。）
 +
  #if CONFIG_USE_AUDIO_PROCESSOR
      /* Start the audio input task */
      xTaskCreatePinnedToCore([](void* arg) {
-@@ -539,7 +567,40 @@ void AudioService::SetCallbacks(AudioServiceCallbacks& callbacks) {
+@@ -539,7 +543,40 @@ void AudioService::SetCallbacks(AudioServiceCallbacks& callbacks) {
      callbacks_ = callbacks;
  }
  
@@ -469,10 +564,10 @@ index 41f60e7..80185b3 100644
  
      // Audio encode / decode
 diff --git a/main/audio/processors/afe_audio_processor.cc b/main/audio/processors/afe_audio_processor.cc
-index a9145be..ddc5e8b 100644
+index a9145be..aa523b4 100644
 --- a/main/audio/processors/afe_audio_processor.cc
 +++ b/main/audio/processors/afe_audio_processor.cc
-@@ -40,7 +40,13 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms, srm
+@@ -40,7 +40,15 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms, srm
      afe_config_t* afe_config = afe_config_init(input_format.c_str(), NULL, AFE_TYPE_VC, AFE_MODE_HIGH_PERF);
      afe_config->aec_mode = AEC_MODE_VOIP_HIGH_PERF;
      afe_config->vad_mode = VAD_MODE_0;
@@ -482,8 +577,10 @@ index a9145be..ddc5e8b 100644
 +    //    关键：设备判定"说完"后会发 listen stop，服务端立刻停止识别出答案，
 +    //    所以**这一层是主战场**，服务端 VAD 的 min_silence_duration_ms 是第二道保险。
 +    //    调大它的代价 = 说完后要多等这么久才开始识别。
-+    //      800=偏灵敏 / 1400=当前 / 2000=非常宽容（但明显感觉慢）
-+    afe_config->vad_min_noise_ms = 1400;
++    //      800=偏灵敏 / 1400=默认 / 2000=非常宽容（但明显感觉慢）
++    //  2026-10-05：数值挪到 Kconfig（LOCAL_TUNING / VAD_MIN_NOISE_MS），
++    //    调参只改 sdkconfig，源码不再有 fork 改动。
++    afe_config->vad_min_noise_ms = CONFIG_VAD_MIN_NOISE_MS;
      if (vad_model_name != nullptr) {
          afe_config->vad_model_name = vad_model_name;
      }
@@ -868,8 +965,32 @@ index 470cc91..b6eadca 100644
      auto now = std::chrono::steady_clock::now();
      auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - last_incoming_time_);
      bool timeout = duration.count() > kTimeoutSeconds;
+diff --git a/main/protocols/protocol.h b/main/protocols/protocol.h
+index 17ab315..cbcdfe3 100644
+--- a/main/protocols/protocol.h
++++ b/main/protocols/protocol.h
+@@ -54,6 +54,11 @@ public:
+     inline const std::string& session_id() const {
+         return session_id_;
+     }
++    // ★ 2026-10-04 聆听超时：由服务端在 hello 里下发（后台可调，不用刷机）。
++    //   读不到就用默认值 180 秒。0 或负数 = 永不超时（退回上游行为）。
++    inline int listening_timeout_sec() const {
++        return listening_timeout_sec_;
++    }
+ 
+     void OnIncomingAudio(std::function<void(std::unique_ptr<AudioStreamPacket> packet)> callback);
+     void OnIncomingJson(std::function<void(const cJSON* root)> callback);
+@@ -85,6 +90,7 @@ protected:
+ 
+     int server_sample_rate_ = 24000;
+     int server_frame_duration_ = 60;
++    int listening_timeout_sec_ = 180;
+     bool error_occurred_ = false;
+     std::string session_id_;
+     std::chrono::time_point<std::chrono::steady_clock> last_incoming_time_;
 diff --git a/main/protocols/websocket_protocol.cc b/main/protocols/websocket_protocol.cc
-index d4f435c..a065cb4 100644
+index d4f435c..1bd3181 100644
 --- a/main/protocols/websocket_protocol.cc
 +++ b/main/protocols/websocket_protocol.cc
 @@ -166,6 +166,12 @@ bool WebsocketProtocol::OpenAudioChannel() {
@@ -914,3 +1035,948 @@ index d4f435c..a065cb4 100644
      if (on_audio_channel_opened_ != nullptr) {
          on_audio_channel_opened_();
      }
+@@ -249,5 +277,14 @@ void WebsocketProtocol::ParseServerHello(const cJSON* root) {
+         }
+     }
+ 
++    // ★ 2026-10-04 聆听超时：后台可调，握手时下发。
++    //   服务端没带这个字段就保持默认 180 秒（见 protocol.h）。
++    //   0 或负数 = 永不超时，退回上游「说完话一直挂着聆听」的老行为。
++    auto listening_timeout = cJSON_GetObjectItem(root, "listening_timeout_sec");
++    if (cJSON_IsNumber(listening_timeout)) {
++        listening_timeout_sec_ = listening_timeout->valueint;
++        ESP_LOGI(TAG, "Listening timeout: %d sec", listening_timeout_sec_);
++    }
++
+     xEventGroupSetBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT);
+ }
+diff --git a/sdkconfig b/sdkconfig
+index 95ab794..6157176 100644
+--- a/sdkconfig
++++ b/sdkconfig
+@@ -1,9 +1,7 @@
+ #
+ # Automatically generated file. DO NOT EDIT.
+-# Espressif IoT Development Framework (ESP-IDF) 5.4.2 Project Configuration
++# Espressif IoT Development Framework (ESP-IDF) 5.5.4 Project Configuration
+ #
+-CONFIG_SOC_MPU_MIN_REGION_SIZE=0x20000000
+-CONFIG_SOC_MPU_REGIONS_MAX_NUM=8
+ CONFIG_SOC_ADC_SUPPORTED=y
+ CONFIG_SOC_UART_SUPPORTED=y
+ CONFIG_SOC_PCNT_SUPPORTED=y
+@@ -11,9 +9,11 @@ CONFIG_SOC_PHY_SUPPORTED=y
+ CONFIG_SOC_WIFI_SUPPORTED=y
+ CONFIG_SOC_TWAI_SUPPORTED=y
+ CONFIG_SOC_GDMA_SUPPORTED=y
++CONFIG_SOC_UHCI_SUPPORTED=y
+ CONFIG_SOC_AHB_GDMA_SUPPORTED=y
+ CONFIG_SOC_GPTIMER_SUPPORTED=y
+ CONFIG_SOC_LCDCAM_SUPPORTED=y
++CONFIG_SOC_LCDCAM_CAM_SUPPORTED=y
+ CONFIG_SOC_LCDCAM_I80_LCD_SUPPORTED=y
+ CONFIG_SOC_LCDCAM_RGB_LCD_SUPPORTED=y
+ CONFIG_SOC_MCPWM_SUPPORTED=y
+@@ -95,13 +95,14 @@ CONFIG_SOC_APB_BACKUP_DMA=y
+ CONFIG_SOC_BROWNOUT_RESET_SUPPORTED=y
+ CONFIG_SOC_CACHE_WRITEBACK_SUPPORTED=y
+ CONFIG_SOC_CACHE_FREEZE_SUPPORTED=y
++CONFIG_SOC_CACHE_ACS_INVALID_STATE_ON_PANIC=y
+ CONFIG_SOC_CPU_CORES_NUM=2
+ CONFIG_SOC_CPU_INTR_NUM=32
+ CONFIG_SOC_CPU_HAS_FPU=y
+ CONFIG_SOC_HP_CPU_HAS_MULTIPLE_CORES=y
+ CONFIG_SOC_CPU_BREAKPOINTS_NUM=2
+ CONFIG_SOC_CPU_WATCHPOINTS_NUM=2
+-CONFIG_SOC_CPU_WATCHPOINT_MAX_REGION_SIZE=64
++CONFIG_SOC_CPU_WATCHPOINT_MAX_REGION_SIZE=0x40
+ CONFIG_SOC_SIMD_PREFERRED_DATA_ALIGNMENT=16
+ CONFIG_SOC_DS_SIGNATURE_MAX_BIT_LEN=4096
+ CONFIG_SOC_DS_KEY_PARAM_MD_IV_LENGTH=16
+@@ -123,7 +124,6 @@ CONFIG_SOC_GPIO_OUT_RANGE_MAX=48
+ CONFIG_SOC_GPIO_VALID_DIGITAL_IO_PAD_MASK=0x0001FFFFFC000000
+ CONFIG_SOC_GPIO_CLOCKOUT_BY_IO_MUX=y
+ CONFIG_SOC_GPIO_CLOCKOUT_CHANNEL_NUM=3
+-CONFIG_SOC_GPIO_SUPPORT_HOLD_IO_IN_DSLP=y
+ CONFIG_SOC_DEDIC_GPIO_OUT_CHANNELS_NUM=8
+ CONFIG_SOC_DEDIC_GPIO_IN_CHANNELS_NUM=8
+ CONFIG_SOC_DEDIC_GPIO_OUT_AUTO_ENABLE=y
+@@ -146,8 +146,10 @@ CONFIG_SOC_I2S_SUPPORTS_PLL_F160M=y
+ CONFIG_SOC_I2S_SUPPORTS_PCM=y
+ CONFIG_SOC_I2S_SUPPORTS_PDM=y
+ CONFIG_SOC_I2S_SUPPORTS_PDM_TX=y
+-CONFIG_SOC_I2S_PDM_MAX_TX_LINES=2
++CONFIG_SOC_I2S_SUPPORTS_PCM2PDM=y
+ CONFIG_SOC_I2S_SUPPORTS_PDM_RX=y
++CONFIG_SOC_I2S_SUPPORTS_PDM2PCM=y
++CONFIG_SOC_I2S_PDM_MAX_TX_LINES=2
+ CONFIG_SOC_I2S_PDM_MAX_RX_LINES=4
+ CONFIG_SOC_I2S_SUPPORTS_TDM=y
+ CONFIG_SOC_LEDC_SUPPORT_APB_CLOCK=y
+@@ -169,6 +171,8 @@ CONFIG_SOC_MCPWM_GPIO_SYNCHROS_PER_GROUP=3
+ CONFIG_SOC_MCPWM_SWSYNC_CAN_PROPAGATE=y
+ CONFIG_SOC_MMU_LINEAR_ADDRESS_REGION_NUM=1
+ CONFIG_SOC_MMU_PERIPH_NUM=1
++CONFIG_SOC_MPU_MIN_REGION_SIZE=0x20000000
++CONFIG_SOC_MPU_REGIONS_MAX_NUM=8
+ CONFIG_SOC_PCNT_GROUPS=1
+ CONFIG_SOC_PCNT_UNITS_PER_GROUP=4
+ CONFIG_SOC_PCNT_CHANNELS_PER_UNIT=2
+@@ -180,7 +184,7 @@ CONFIG_SOC_RMT_CHANNELS_PER_GROUP=8
+ CONFIG_SOC_RMT_MEM_WORDS_PER_CHANNEL=48
+ CONFIG_SOC_RMT_SUPPORT_RX_PINGPONG=y
+ CONFIG_SOC_RMT_SUPPORT_RX_DEMODULATION=y
+-CONFIG_SOC_RMT_SUPPORT_TX_ASYNC_STOP=y
++CONFIG_SOC_RMT_SUPPORT_ASYNC_STOP=y
+ CONFIG_SOC_RMT_SUPPORT_TX_LOOP_COUNT=y
+ CONFIG_SOC_RMT_SUPPORT_TX_LOOP_AUTO_STOP=y
+ CONFIG_SOC_RMT_SUPPORT_TX_SYNCHRO=y
+@@ -203,12 +207,13 @@ CONFIG_SOC_LCDCAM_RGB_DATA_WIDTH=16
+ CONFIG_SOC_RTC_CNTL_CPU_PD_DMA_BUS_WIDTH=128
+ CONFIG_SOC_RTC_CNTL_CPU_PD_REG_FILE_NUM=549
+ CONFIG_SOC_RTC_CNTL_TAGMEM_PD_DMA_BUS_WIDTH=128
++CONFIG_SOC_RTC_CNTL_NEEDS_ATOMIC_ACCESS=y
+ CONFIG_SOC_RTCIO_PIN_COUNT=22
+ CONFIG_SOC_RTCIO_INPUT_OUTPUT_SUPPORTED=y
+ CONFIG_SOC_RTCIO_HOLD_SUPPORTED=y
+ CONFIG_SOC_RTCIO_WAKE_SUPPORTED=y
+ CONFIG_SOC_LP_IO_CLOCK_IS_INDEPENDENT=y
+-CONFIG_SOC_SDM_GROUPS=y
++CONFIG_SOC_SDM_GROUPS=1
+ CONFIG_SOC_SDM_CHANNELS_PER_GROUP=8
+ CONFIG_SOC_SDM_CLK_SUPPORT_APB=y
+ CONFIG_SOC_SPI_PERIPH_NUM=3
+@@ -229,10 +234,6 @@ CONFIG_SOC_SPI_SCT_SUPPORTED=y
+ CONFIG_SOC_SPI_SCT_REG_NUM=14
+ CONFIG_SOC_SPI_SCT_BUFFER_NUM_MAX=y
+ CONFIG_SOC_SPI_SCT_CONF_BITLEN_MAX=0x3FFFA
+-CONFIG_SOC_MEMSPI_SRC_FREQ_120M=y
+-CONFIG_SOC_MEMSPI_SRC_FREQ_80M_SUPPORTED=y
+-CONFIG_SOC_MEMSPI_SRC_FREQ_40M_SUPPORTED=y
+-CONFIG_SOC_MEMSPI_SRC_FREQ_20M_SUPPORTED=y
+ CONFIG_SOC_SPIRAM_SUPPORTED=y
+ CONFIG_SOC_SPIRAM_XIP_SUPPORTED=y
+ CONFIG_SOC_SYSTIMER_COUNTER_NUM=2
+@@ -252,13 +253,18 @@ CONFIG_SOC_LP_TIMER_BIT_WIDTH_LO=32
+ CONFIG_SOC_LP_TIMER_BIT_WIDTH_HI=16
+ CONFIG_SOC_TOUCH_SENSOR_VERSION=2
+ CONFIG_SOC_TOUCH_SENSOR_NUM=15
++CONFIG_SOC_TOUCH_MIN_CHAN_ID=1
++CONFIG_SOC_TOUCH_MAX_CHAN_ID=14
++CONFIG_SOC_TOUCH_SUPPORT_BENCHMARK=y
+ CONFIG_SOC_TOUCH_SUPPORT_SLEEP_WAKEUP=y
+ CONFIG_SOC_TOUCH_SUPPORT_WATERPROOF=y
+ CONFIG_SOC_TOUCH_SUPPORT_PROX_SENSING=y
++CONFIG_SOC_TOUCH_SUPPORT_DENOISE_CHAN=y
+ CONFIG_SOC_TOUCH_PROXIMITY_CHANNEL_NUM=3
+ CONFIG_SOC_TOUCH_PROXIMITY_MEAS_DONE_SUPPORTED=y
+ CONFIG_SOC_TOUCH_SAMPLE_CFG_NUM=1
+ CONFIG_SOC_TWAI_CONTROLLER_NUM=1
++CONFIG_SOC_TWAI_MASK_FILTER_NUM=1
+ CONFIG_SOC_TWAI_CLK_SUPPORT_APB=y
+ CONFIG_SOC_TWAI_BRP_MIN=2
+ CONFIG_SOC_TWAI_BRP_MAX=16384
+@@ -272,6 +278,8 @@ CONFIG_SOC_UART_SUPPORT_WAKEUP_INT=y
+ CONFIG_SOC_UART_SUPPORT_APB_CLK=y
+ CONFIG_SOC_UART_SUPPORT_RTC_CLK=y
+ CONFIG_SOC_UART_SUPPORT_XTAL_CLK=y
++CONFIG_SOC_UART_WAKEUP_SUPPORT_ACTIVE_THRESH_MODE=y
++CONFIG_SOC_UHCI_NUM=1
+ CONFIG_SOC_USB_OTG_PERIPH_NUM=1
+ CONFIG_SOC_SHA_DMA_MAX_BUFFER_SIZE=3968
+ CONFIG_SOC_SHA_SUPPORT_DMA=y
+@@ -314,6 +322,7 @@ CONFIG_SOC_CLK_RC_FAST_D256_SUPPORTED=y
+ CONFIG_SOC_RTC_SLOW_CLK_SUPPORT_RC_FAST_D256=y
+ CONFIG_SOC_CLK_RC_FAST_SUPPORT_CALIBRATION=y
+ CONFIG_SOC_CLK_XTAL32K_SUPPORTED=y
++CONFIG_SOC_CLK_LP_FAST_SUPPORT_XTAL_D2=y
+ CONFIG_SOC_EFUSE_DIS_DOWNLOAD_ICACHE=y
+ CONFIG_SOC_EFUSE_DIS_DOWNLOAD_DCACHE=y
+ CONFIG_SOC_EFUSE_HARD_DIS_JTAG=y
+@@ -340,13 +349,14 @@ CONFIG_SOC_SPI_MEM_SUPPORT_AUTO_WAIT_IDLE=y
+ CONFIG_SOC_SPI_MEM_SUPPORT_AUTO_SUSPEND=y
+ CONFIG_SOC_SPI_MEM_SUPPORT_AUTO_RESUME=y
+ CONFIG_SOC_SPI_MEM_SUPPORT_SW_SUSPEND=y
+-CONFIG_SOC_SPI_MEM_SUPPORT_OPI_MODE=y
++CONFIG_SOC_SPI_MEM_SUPPORT_FLASH_OPI_MODE=y
+ CONFIG_SOC_SPI_MEM_SUPPORT_TIMING_TUNING=y
+ CONFIG_SOC_SPI_MEM_SUPPORT_CONFIG_GPIO_BY_EFUSE=y
+ CONFIG_SOC_SPI_MEM_SUPPORT_WRAP=y
+ CONFIG_SOC_MEMSPI_TIMING_TUNING_BY_MSPI_DELAY=y
+ CONFIG_SOC_MEMSPI_CORE_CLK_SHARED_WITH_PSRAM=y
+ CONFIG_SOC_SPI_MEM_SUPPORT_CACHE_32BIT_ADDR_MAP=y
++CONFIG_SOC_SPI_MEM_FLASH_SUPPORT_HPM=y
+ CONFIG_SOC_COEX_HW_PTI=y
+ CONFIG_SOC_EXTERNAL_COEX_LEADER_TX_LINE=y
+ CONFIG_SOC_SDMMC_USE_GPIO_MATRIX=y
+@@ -358,6 +368,7 @@ CONFIG_SOC_WIFI_HW_TSF=y
+ CONFIG_SOC_WIFI_FTM_SUPPORT=y
+ CONFIG_SOC_WIFI_GCMP_SUPPORT=y
+ CONFIG_SOC_WIFI_WAPI_SUPPORT=y
++CONFIG_SOC_WIFI_TXOP_SUPPORT=y
+ CONFIG_SOC_WIFI_CSI_SUPPORT=y
+ CONFIG_SOC_WIFI_MESH_SUPPORT=y
+ CONFIG_SOC_WIFI_SUPPORT_VARIABLE_BEACON_WINDOW=y
+@@ -369,13 +380,16 @@ CONFIG_SOC_BLE_DEVICE_PRIVACY_SUPPORTED=y
+ CONFIG_SOC_BLUFI_SUPPORTED=y
+ CONFIG_SOC_ULP_HAS_ADC=y
+ CONFIG_SOC_PHY_COMBO_MODULE=y
++CONFIG_SOC_LCDCAM_CAM_SUPPORT_RGB_YUV_CONV=y
++CONFIG_SOC_LCDCAM_CAM_PERIPH_NUM=1
++CONFIG_SOC_LCDCAM_CAM_DATA_WIDTH_MAX=16
+ CONFIG_IDF_CMAKE=y
+ CONFIG_IDF_TOOLCHAIN="gcc"
+ CONFIG_IDF_TOOLCHAIN_GCC=y
+ CONFIG_IDF_TARGET_ARCH_XTENSA=y
+ CONFIG_IDF_TARGET_ARCH="xtensa"
+ CONFIG_IDF_TARGET="esp32s3"
+-CONFIG_IDF_INIT_VERSION="5.4.2"
++CONFIG_IDF_INIT_VERSION="5.5.4"
+ CONFIG_IDF_TARGET_ESP32S3=y
+ CONFIG_IDF_FIRMWARE_CHIP_ID=0x0009
+ 
+@@ -402,6 +416,18 @@ CONFIG_BOOTLOADER_COMPILE_TIME_DATE=y
+ CONFIG_BOOTLOADER_PROJECT_VER=1
+ # end of Bootloader manager
+ 
++#
++# Application Rollback
++#
++CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
++# CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK is not set
++# end of Application Rollback
++
++#
++# Recovery Bootloader and Rollback
++#
++# end of Recovery Bootloader and Rollback
++
+ CONFIG_BOOTLOADER_OFFSET_IN_FLASH=0x0
+ # CONFIG_BOOTLOADER_COMPILER_OPTIMIZATION_SIZE is not set
+ # CONFIG_BOOTLOADER_COMPILER_OPTIMIZATION_DEBUG is not set
+@@ -411,6 +437,8 @@ CONFIG_BOOTLOADER_COMPILER_OPTIMIZATION_PERF=y
+ #
+ # Log
+ #
++CONFIG_BOOTLOADER_LOG_VERSION_1=y
++CONFIG_BOOTLOADER_LOG_VERSION=1
+ CONFIG_BOOTLOADER_LOG_LEVEL_NONE=y
+ # CONFIG_BOOTLOADER_LOG_LEVEL_ERROR is not set
+ # CONFIG_BOOTLOADER_LOG_LEVEL_WARN is not set
+@@ -425,6 +453,13 @@ CONFIG_BOOTLOADER_LOG_LEVEL=0
+ # CONFIG_BOOTLOADER_LOG_COLORS is not set
+ CONFIG_BOOTLOADER_LOG_TIMESTAMP_SOURCE_CPU_TICKS=y
+ # end of Format
++
++#
++# Settings
++#
++CONFIG_BOOTLOADER_LOG_MODE_TEXT_EN=y
++CONFIG_BOOTLOADER_LOG_MODE_TEXT=y
++# end of Settings
+ # end of Log
+ 
+ #
+@@ -441,8 +476,6 @@ CONFIG_BOOTLOADER_REGION_PROTECTION_ENABLE=y
+ CONFIG_BOOTLOADER_WDT_ENABLE=y
+ # CONFIG_BOOTLOADER_WDT_DISABLE_IN_USER_CODE is not set
+ CONFIG_BOOTLOADER_WDT_TIME_MS=9000
+-CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+-# CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK is not set
+ CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP=y
+ CONFIG_BOOTLOADER_SKIP_VALIDATE_ON_POWER_ON=y
+ CONFIG_BOOTLOADER_SKIP_VALIDATE_ALWAYS=y
+@@ -487,6 +520,7 @@ CONFIG_ESP_ROM_HAS_HAL_WDT=y
+ CONFIG_ESP_ROM_NEEDS_SWSETUP_WORKAROUND=y
+ CONFIG_ESP_ROM_HAS_LAYOUT_TABLE=y
+ CONFIG_ESP_ROM_HAS_SPI_FLASH=y
++CONFIG_ESP_ROM_HAS_SPI_FLASH_MMAP=y
+ CONFIG_ESP_ROM_HAS_ETS_PRINTF_BUG=y
+ CONFIG_ESP_ROM_HAS_NEWLIB=y
+ CONFIG_ESP_ROM_HAS_NEWLIB_NANO_FORMAT=y
+@@ -500,6 +534,7 @@ CONFIG_ESP_ROM_HAS_SW_FLOAT=y
+ CONFIG_ESP_ROM_HAS_VERSION=y
+ CONFIG_ESP_ROM_SUPPORT_DEEP_SLEEP_WAKEUP_STUB=y
+ CONFIG_ESP_ROM_HAS_OUTPUT_PUTC_FUNC=y
++CONFIG_ESP_ROM_CONSOLE_OUTPUT_SECONDARY=y
+ 
+ #
+ # Boot ROM Behavior
+@@ -563,16 +598,16 @@ CONFIG_PARTITION_TABLE_MD5=y
+ #
+ # Xiaozhi Assistant
+ #
+-CONFIG_OTA_URL="https://api.tenclass.net/xiaozhi/ota/"
++CONFIG_OTA_URL="http://192.168.3.139:8003/xiaozhi/ota/"
+ CONFIG_FLASH_NONE_ASSETS=y
+ # CONFIG_FLASH_DEFAULT_ASSETS is not set
+ # CONFIG_FLASH_CUSTOM_ASSETS is not set
+-# CONFIG_LANGUAGE_ZH_CN is not set
++CONFIG_LANGUAGE_ZH_CN=y
+ # CONFIG_LANGUAGE_ZH_TW is not set
+ # CONFIG_LANGUAGE_EN_US is not set
+ # CONFIG_LANGUAGE_JA_JP is not set
+ # CONFIG_LANGUAGE_KO_KR is not set
+-CONFIG_LANGUAGE_VI_VN=y
++# CONFIG_LANGUAGE_VI_VN is not set
+ # CONFIG_LANGUAGE_TH_TH is not set
+ # CONFIG_LANGUAGE_DE_DE is not set
+ # CONFIG_LANGUAGE_FR_FR is not set
+@@ -676,6 +711,12 @@ CONFIG_AUDIO_DEBUG_UDP_SERVER="192.168.122.143:8000"
+ # CONFIG_RECEIVE_CUSTOM_MESSAGE is not set
+ # end of Xiaozhi Assistant
+ 
++#
++# LOCAL_TUNING
++#
++CONFIG_VAD_MIN_NOISE_MS=1400
++# end of LOCAL_TUNING
++
+ #
+ # ESP Speech Recognition
+ #
+@@ -709,7 +750,7 @@ CONFIG_SR_WN_WN9_NIHAOXIAOZHI_TTS=y
+ # CONFIG_SR_WN_WN9_COMPUTER_TTS is not set
+ # CONFIG_SR_WN_WN9_HEYWILLOW_TTS is not set
+ # CONFIG_SR_WN_WN9_HIMFIVE is not set
+-CONFIG_SR_WN_WN9_SOPHIA_TTS=y
++# CONFIG_SR_WN_WN9_SOPHIA_TTS is not set
+ # CONFIG_SR_WN_WN9_HEYWANDA_TTS is not set
+ # CONFIG_SR_WN_WN9_HIJOLLY_TTS2 is not set
+ # CONFIG_SR_WN_WN9_HIFAIRY_TTS2 is not set
+@@ -818,7 +859,16 @@ CONFIG_APPTRACE_LOCK_ENABLE=y
+ #
+ # Common Options
+ #
++
++#
++# BLE Log
++#
++# CONFIG_BLE_LOG_ENABLED is not set
++# end of BLE Log
++
+ # CONFIG_BT_BLE_LOG_SPI_OUT_ENABLED is not set
++# CONFIG_BT_BLE_LOG_UHCI_OUT_ENABLED is not set
++# CONFIG_BT_LE_USED_MEM_STATISTICS_ENABLED is not set
+ # end of Common Options
+ # end of Bluetooth
+ 
+@@ -833,11 +883,11 @@ CONFIG_APPTRACE_LOCK_ENABLE=y
+ #
+ 
+ #
+-# TWAI Configuration
++# Legacy TWAI Driver Configurations
+ #
+-# CONFIG_TWAI_ISR_IN_IRAM is not set
++# CONFIG_TWAI_SKIP_LEGACY_CONFLICT_CHECK is not set
+ CONFIG_TWAI_ERRATA_FIX_LISTEN_ONLY_DOM=y
+-# end of TWAI Configuration
++# end of Legacy TWAI Driver Configurations
+ 
+ #
+ # Legacy ADC Driver Configuration
+@@ -906,6 +956,13 @@ CONFIG_TWAI_ERRATA_FIX_LISTEN_ONLY_DOM=y
+ # CONFIG_TEMP_SENSOR_SUPPRESS_DEPRECATE_WARN is not set
+ # CONFIG_TEMP_SENSOR_SKIP_LEGACY_CONFLICT_CHECK is not set
+ # end of Legacy Temperature Sensor Driver Configurations
++
++#
++# Legacy Touch Sensor Driver Configurations
++#
++# CONFIG_TOUCH_SUPPRESS_DEPRECATE_WARN is not set
++# CONFIG_TOUCH_SKIP_LEGACY_CONFLICT_CHECK is not set
++# end of Legacy Touch Sensor Driver Configurations
+ # end of Driver Configurations
+ 
+ #
+@@ -920,6 +977,7 @@ CONFIG_EFUSE_MAX_BLK_LEN=256
+ # ESP-TLS
+ #
+ CONFIG_ESP_TLS_USING_MBEDTLS=y
++# CONFIG_ESP_TLS_USE_SECURE_ELEMENT is not set
+ CONFIG_ESP_TLS_USE_DS_PERIPHERAL=y
+ # CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS is not set
+ # CONFIG_ESP_TLS_SERVER_SESSION_TICKETS is not set
+@@ -927,6 +985,7 @@ CONFIG_ESP_TLS_USE_DS_PERIPHERAL=y
+ # CONFIG_ESP_TLS_SERVER_MIN_AUTH_MODE_OPTIONAL is not set
+ # CONFIG_ESP_TLS_PSK_VERIFICATION is not set
+ # CONFIG_ESP_TLS_INSECURE is not set
++CONFIG_ESP_TLS_DYN_BUF_STRATEGY_SUPPORTED=y
+ # end of ESP-TLS
+ 
+ #
+@@ -952,6 +1011,12 @@ CONFIG_ESP_COEX_ENABLED=y
+ CONFIG_ESP_ERR_TO_NAME_LOOKUP=y
+ # end of Common ESP-related
+ 
++#
++# ESP-Driver:Camera Controller Configurations
++#
++# CONFIG_CAM_CTLR_DVP_CAM_ISR_CACHE_SAFE is not set
++# end of ESP-Driver:Camera Controller Configurations
++
+ #
+ # ESP-Driver:GPIO Configurations
+ #
+@@ -963,7 +1028,7 @@ CONFIG_ESP_ERR_TO_NAME_LOOKUP=y
+ #
+ CONFIG_GPTIMER_ISR_HANDLER_IN_IRAM=y
+ # CONFIG_GPTIMER_CTRL_FUNC_IN_IRAM is not set
+-# CONFIG_GPTIMER_ISR_IRAM_SAFE is not set
++# CONFIG_GPTIMER_ISR_CACHE_SAFE is not set
+ CONFIG_GPTIMER_OBJ_CACHE_SAFE=y
+ # CONFIG_GPTIMER_ENABLE_DEBUG_LOG is not set
+ # end of ESP-Driver:GPTimer Configurations
+@@ -974,6 +1039,7 @@ CONFIG_GPTIMER_OBJ_CACHE_SAFE=y
+ # CONFIG_I2C_ISR_IRAM_SAFE is not set
+ # CONFIG_I2C_ENABLE_DEBUG_LOG is not set
+ # CONFIG_I2C_ENABLE_SLAVE_DRIVER_VERSION_2 is not set
++CONFIG_I2C_MASTER_ISR_HANDLER_IN_IRAM=y
+ # end of ESP-Driver:I2C Configurations
+ 
+ #
+@@ -992,8 +1058,10 @@ CONFIG_GPTIMER_OBJ_CACHE_SAFE=y
+ #
+ # ESP-Driver:MCPWM Configurations
+ #
+-# CONFIG_MCPWM_ISR_IRAM_SAFE is not set
++CONFIG_MCPWM_ISR_HANDLER_IN_IRAM=y
++# CONFIG_MCPWM_ISR_CACHE_SAFE is not set
+ # CONFIG_MCPWM_CTRL_FUNC_IN_IRAM is not set
++CONFIG_MCPWM_OBJ_CACHE_SAFE=y
+ # CONFIG_MCPWM_ENABLE_DEBUG_LOG is not set
+ # end of ESP-Driver:MCPWM Configurations
+ 
+@@ -1008,9 +1076,15 @@ CONFIG_GPTIMER_OBJ_CACHE_SAFE=y
+ #
+ # ESP-Driver:RMT Configurations
+ #
+-# CONFIG_RMT_ISR_IRAM_SAFE is not set
++CONFIG_RMT_ENCODER_FUNC_IN_IRAM=y
++CONFIG_RMT_TX_ISR_HANDLER_IN_IRAM=y
++CONFIG_RMT_RX_ISR_HANDLER_IN_IRAM=y
+ # CONFIG_RMT_RECV_FUNC_IN_IRAM is not set
++# CONFIG_RMT_TX_ISR_CACHE_SAFE is not set
++# CONFIG_RMT_RX_ISR_CACHE_SAFE is not set
++CONFIG_RMT_OBJ_CACHE_SAFE=y
+ # CONFIG_RMT_ENABLE_DEBUG_LOG is not set
++# CONFIG_RMT_ISR_IRAM_SAFE is not set
+ # end of ESP-Driver:RMT Configurations
+ 
+ #
+@@ -1035,6 +1109,7 @@ CONFIG_SPI_SLAVE_ISR_IN_IRAM=y
+ # CONFIG_TOUCH_CTRL_FUNC_IN_IRAM is not set
+ # CONFIG_TOUCH_ISR_IRAM_SAFE is not set
+ # CONFIG_TOUCH_ENABLE_DEBUG_LOG is not set
++# CONFIG_TOUCH_SKIP_FSM_CHECK is not set
+ # end of ESP-Driver:Touch Sensor Configurations
+ 
+ #
+@@ -1043,12 +1118,29 @@ CONFIG_SPI_SLAVE_ISR_IN_IRAM=y
+ # CONFIG_TEMP_SENSOR_ENABLE_DEBUG_LOG is not set
+ # end of ESP-Driver:Temperature Sensor Configurations
+ 
++#
++# ESP-Driver:TWAI Configurations
++#
++# CONFIG_TWAI_ISR_IN_IRAM is not set
++# CONFIG_TWAI_IO_FUNC_IN_IRAM is not set
++# CONFIG_TWAI_ISR_CACHE_SAFE is not set
++# CONFIG_TWAI_ENABLE_DEBUG_LOG is not set
++# end of ESP-Driver:TWAI Configurations
++
+ #
+ # ESP-Driver:UART Configurations
+ #
+ CONFIG_UART_ISR_IN_IRAM=y
+ # end of ESP-Driver:UART Configurations
+ 
++#
++# ESP-Driver:UHCI Configurations
++#
++# CONFIG_UHCI_ISR_HANDLER_IN_IRAM is not set
++# CONFIG_UHCI_ISR_CACHE_SAFE is not set
++# CONFIG_UHCI_ENABLE_DEBUG_LOG is not set
++# end of ESP-Driver:UHCI Configurations
++
+ #
+ # ESP-Driver:USB Serial/JTAG Configuration
+ #
+@@ -1127,11 +1219,13 @@ CONFIG_ESP_HTTPS_OTA_EVENT_POST_TIMEOUT=2000
+ #
+ # CONFIG_ESP_HTTPS_SERVER_ENABLE is not set
+ CONFIG_ESP_HTTPS_SERVER_EVENT_POST_TIMEOUT=2000
++# CONFIG_ESP_HTTPS_SERVER_CERT_SELECT_HOOK is not set
+ # end of ESP HTTPS server
+ 
+ #
+ # Hardware Settings
+ #
++CONFIG_ESP_HW_SUPPORT_FUNC_IN_IRAM=y
+ 
+ #
+ # Chip revision
+@@ -1192,12 +1286,15 @@ CONFIG_RTC_CLK_SRC_INT_RC=y
+ # CONFIG_RTC_CLK_SRC_EXT_OSC is not set
+ # CONFIG_RTC_CLK_SRC_INT_8MD256 is not set
+ CONFIG_RTC_CLK_CAL_CYCLES=1024
++CONFIG_RTC_CLK_FUNC_IN_IRAM=y
++CONFIG_RTC_TIME_FUNC_IN_IRAM=y
+ # end of RTC Clock Config
+ 
+ #
+ # Peripheral Control
+ #
+-CONFIG_PERIPH_CTRL_FUNC_IN_IRAM=y
++CONFIG_ESP_PERIPH_CTRL_FUNC_IN_IRAM=y
++CONFIG_ESP_REGI2C_CTRL_FUNC_IN_IRAM=y
+ # end of Peripheral Control
+ 
+ #
+@@ -1217,15 +1314,36 @@ CONFIG_XTAL_FREQ_40=y
+ CONFIG_XTAL_FREQ=40
+ # end of Main XTAL Config
+ 
++#
++# Power Supplier
++#
++
++#
++# Brownout Detector
++#
++CONFIG_ESP_BROWNOUT_DET=y
++CONFIG_ESP_BROWNOUT_DET_LVL_SEL_7=y
++# CONFIG_ESP_BROWNOUT_DET_LVL_SEL_6 is not set
++# CONFIG_ESP_BROWNOUT_DET_LVL_SEL_5 is not set
++# CONFIG_ESP_BROWNOUT_DET_LVL_SEL_4 is not set
++# CONFIG_ESP_BROWNOUT_DET_LVL_SEL_3 is not set
++# CONFIG_ESP_BROWNOUT_DET_LVL_SEL_2 is not set
++# CONFIG_ESP_BROWNOUT_DET_LVL_SEL_1 is not set
++CONFIG_ESP_BROWNOUT_DET_LVL=7
++CONFIG_ESP_BROWNOUT_USE_INTR=y
++# end of Brownout Detector
++# end of Power Supplier
++
+ CONFIG_ESP_SPI_BUS_LOCK_ISR_FUNCS_IN_IRAM=y
++CONFIG_ESP_INTR_IN_IRAM=y
+ # end of Hardware Settings
+ 
+ #
+ # ESP-Driver:LCD Controller Configurations
+ #
+-# CONFIG_LCD_ENABLE_DEBUG_LOG is not set
+ # CONFIG_LCD_RGB_ISR_IRAM_SAFE is not set
+ # CONFIG_LCD_RGB_RESTART_IN_VSYNC is not set
++# CONFIG_LCD_ENABLE_DEBUG_LOG is not set
+ # end of ESP-Driver:LCD Controller Configurations
+ 
+ #
+@@ -1269,15 +1387,19 @@ CONFIG_ESP_PHY_RF_CAL_PARTIAL=y
+ # CONFIG_ESP_PHY_RF_CAL_NONE is not set
+ # CONFIG_ESP_PHY_RF_CAL_FULL is not set
+ CONFIG_ESP_PHY_CALIBRATION_MODE=0
++CONFIG_ESP_PHY_PLL_TRACK_PERIOD_MS=1000
+ # CONFIG_ESP_PHY_PLL_TRACK_DEBUG is not set
+ # CONFIG_ESP_PHY_RECORD_USED_TIME is not set
++CONFIG_ESP_PHY_IRAM_OPT=y
++# CONFIG_ESP_PHY_DEBUG is not set
+ # end of PHY
+ 
+ #
+ # Power Management
+ #
++# CONFIG_PM_SLEEP_FUNC_IN_IRAM is not set
+ # CONFIG_PM_ENABLE is not set
+-CONFIG_PM_SLP_IRAM_OPT=y
++# CONFIG_PM_SLP_IRAM_OPT is not set
+ CONFIG_PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP=y
+ CONFIG_PM_RESTORE_CACHE_TAGMEM_AFTER_LIGHT_SLEEP=y
+ # end of Power Management
+@@ -1303,6 +1425,7 @@ CONFIG_SPIRAM_SPEED_80M=y
+ # CONFIG_SPIRAM_SPEED_40M is not set
+ CONFIG_SPIRAM_SPEED=80
+ # CONFIG_SPIRAM_ECC_ENABLE is not set
++CONFIG_SPIRAM_BOOT_HW_INIT=y
+ CONFIG_SPIRAM_BOOT_INIT=y
+ CONFIG_SPIRAM_PRE_CONFIGURE_MEMORY_PROTECTION=y
+ # CONFIG_SPIRAM_IGNORE_NOTFOUND is not set
+@@ -1324,6 +1447,12 @@ CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
+ # CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH is not set
+ # end of ESP Ringbuf
+ 
++#
++# ESP-ROM
++#
++CONFIG_ESP_ROM_PRINT_IN_IRAM=y
++# end of ESP-ROM
++
+ #
+ # ESP Security Specific
+ #
+@@ -1375,6 +1504,7 @@ CONFIG_ESP32S3_DATA_CACHE_LINE_SIZE=64
+ CONFIG_ESP32S3_TRACEMEM_RESERVE_DRAM=0x0
+ # end of Trace memory
+ 
++CONFIG_ESP_SYSTEM_IN_IRAM=y
+ # CONFIG_ESP_SYSTEM_PANIC_PRINT_HALT is not set
+ CONFIG_ESP_SYSTEM_PANIC_PRINT_REBOOT=y
+ # CONFIG_ESP_SYSTEM_PANIC_SILENT_REBOOT is not set
+@@ -1423,28 +1553,13 @@ CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=y
+ # CONFIG_ESP_DEBUG_STUBS_ENABLE is not set
+ CONFIG_ESP_DEBUG_OCDAWARE=y
+ CONFIG_ESP_SYSTEM_CHECK_INT_LEVEL_4=y
+-
+-#
+-# Brownout Detector
+-#
+-CONFIG_ESP_BROWNOUT_DET=y
+-CONFIG_ESP_BROWNOUT_DET_LVL_SEL_7=y
+-# CONFIG_ESP_BROWNOUT_DET_LVL_SEL_6 is not set
+-# CONFIG_ESP_BROWNOUT_DET_LVL_SEL_5 is not set
+-# CONFIG_ESP_BROWNOUT_DET_LVL_SEL_4 is not set
+-# CONFIG_ESP_BROWNOUT_DET_LVL_SEL_3 is not set
+-# CONFIG_ESP_BROWNOUT_DET_LVL_SEL_2 is not set
+-# CONFIG_ESP_BROWNOUT_DET_LVL_SEL_1 is not set
+-CONFIG_ESP_BROWNOUT_DET_LVL=7
+-# end of Brownout Detector
+-
+-CONFIG_ESP_SYSTEM_BROWNOUT_INTR=y
+ CONFIG_ESP_SYSTEM_BBPLL_RECALIB=y
+ # end of ESP System Settings
+ 
+ #
+ # IPC (Inter-Processor Call)
+ #
++CONFIG_ESP_IPC_ENABLE=y
+ CONFIG_ESP_IPC_TASK_STACK_SIZE=1280
+ CONFIG_ESP_IPC_USES_CALLERS_PRIORITY=y
+ CONFIG_ESP_IPC_ISR_ENABLE=y
+@@ -1453,6 +1568,7 @@ CONFIG_ESP_IPC_ISR_ENABLE=y
+ #
+ # ESP Timer (High Resolution Timer)
+ #
++CONFIG_ESP_TIMER_IN_IRAM=y
+ # CONFIG_ESP_TIMER_PROFILING is not set
+ CONFIG_ESP_TIME_FUNCS_USE_RTC_TIMER=y
+ CONFIG_ESP_TIME_FUNCS_USE_ESP_TIMER=y
+@@ -1495,10 +1611,12 @@ CONFIG_ESP_WIFI_MGMT_SBUF_NUM=32
+ # CONFIG_ESP_WIFI_RX_IRAM_OPT is not set
+ CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=y
+ CONFIG_ESP_WIFI_ENABLE_SAE_PK=y
++CONFIG_ESP_WIFI_ENABLE_SAE_H2E=y
+ CONFIG_ESP_WIFI_SOFTAP_SAE_SUPPORT=y
+ CONFIG_ESP_WIFI_ENABLE_WPA3_OWE_STA=y
+ # CONFIG_ESP_WIFI_SLP_IRAM_OPT is not set
+ CONFIG_ESP_WIFI_SLP_DEFAULT_MIN_ACTIVE_TIME=50
++# CONFIG_ESP_WIFI_BSS_MAX_IDLE_SUPPORT is not set
+ CONFIG_ESP_WIFI_SLP_DEFAULT_MAX_ACTIVE_TIME=10
+ CONFIG_ESP_WIFI_SLP_DEFAULT_WAIT_BROADCAST_DATA_TIME=15
+ # CONFIG_ESP_WIFI_FTM_ENABLE is not set
+@@ -1510,7 +1628,6 @@ CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
+ CONFIG_ESP_WIFI_ESPNOW_MAX_ENCRYPT_NUM=7
+ CONFIG_ESP_WIFI_MBEDTLS_CRYPTO=y
+ # CONFIG_ESP_WIFI_WAPI_PSK is not set
+-# CONFIG_ESP_WIFI_SUITE_B_192 is not set
+ # CONFIG_ESP_WIFI_11KV_SUPPORT is not set
+ # CONFIG_ESP_WIFI_MBO_SUPPORT is not set
+ # CONFIG_ESP_WIFI_DPP_SUPPORT is not set
+@@ -1522,10 +1639,10 @@ CONFIG_ESP_WIFI_MBEDTLS_CRYPTO=y
+ #
+ # CONFIG_ESP_WIFI_WPS_STRICT is not set
+ # CONFIG_ESP_WIFI_WPS_PASSPHRASE is not set
++# CONFIG_ESP_WIFI_WPS_RECONNECT_ON_FAIL is not set
+ # end of WPS Configuration Options
+ 
+ # CONFIG_ESP_WIFI_DEBUG_PRINT is not set
+-# CONFIG_ESP_WIFI_TESTING_OPTIONS is not set
+ # CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT is not set
+ # end of Wi-Fi
+ 
+@@ -1664,6 +1781,7 @@ CONFIG_FREERTOS_DEBUG_OCDAWARE=y
+ CONFIG_FREERTOS_ENABLE_TASK_SNAPSHOT=y
+ CONFIG_FREERTOS_PLACE_SNAPSHOT_FUNS_INTO_FLASH=y
+ CONFIG_FREERTOS_NUMBER_OF_CORES=2
++CONFIG_FREERTOS_IN_IRAM=y
+ # end of FreeRTOS
+ 
+ #
+@@ -1675,8 +1793,6 @@ CONFIG_HAL_ASSERTION_EQUALS_SYSTEM=y
+ # CONFIG_HAL_ASSERTION_ENABLE is not set
+ CONFIG_HAL_DEFAULT_ASSERTION_LEVEL=2
+ CONFIG_HAL_WDT_USE_ROM_IMPL=y
+-CONFIG_HAL_SPI_MASTER_FUNC_IN_IRAM=y
+-CONFIG_HAL_SPI_SLAVE_FUNC_IN_IRAM=y
+ # end of Hardware Abstraction Layer (HAL) and Low Level (LL)
+ 
+ #
+@@ -1697,6 +1813,9 @@ CONFIG_HEAP_TRACING_OFF=y
+ #
+ # Log
+ #
++CONFIG_LOG_VERSION_1=y
++# CONFIG_LOG_VERSION_2 is not set
++CONFIG_LOG_VERSION=1
+ 
+ #
+ # Log Level
+@@ -1734,6 +1853,15 @@ CONFIG_LOG_TAG_LEVEL_IMPL_CACHE_SIZE=31
+ CONFIG_LOG_TIMESTAMP_SOURCE_RTOS=y
+ # CONFIG_LOG_TIMESTAMP_SOURCE_SYSTEM is not set
+ # end of Format
++
++#
++# Settings
++#
++CONFIG_LOG_MODE_TEXT_EN=y
++CONFIG_LOG_MODE_TEXT=y
++# end of Settings
++
++CONFIG_LOG_IN_IRAM=y
+ # end of Log
+ 
+ #
+@@ -1741,7 +1869,6 @@ CONFIG_LOG_TIMESTAMP_SOURCE_RTOS=y
+ #
+ CONFIG_LWIP_ENABLE=y
+ CONFIG_LWIP_LOCAL_HOSTNAME="espressif"
+-# CONFIG_LWIP_NETIF_API is not set
+ CONFIG_LWIP_TCPIP_TASK_PRIO=18
+ # CONFIG_LWIP_TCPIP_CORE_LOCKING is not set
+ # CONFIG_LWIP_CHECK_THREAD_SAFETY is not set
+@@ -1884,6 +2011,9 @@ CONFIG_LWIP_ESP_LWIP_ASSERT=y
+ # CONFIG_LWIP_HOOK_TCP_ISN_NONE is not set
+ CONFIG_LWIP_HOOK_TCP_ISN_DEFAULT=y
+ # CONFIG_LWIP_HOOK_TCP_ISN_CUSTOM is not set
++CONFIG_LWIP_HOOK_DHCP_EXTRA_OPTION_NONE=y
++# CONFIG_LWIP_HOOK_DHCP_EXTRA_OPTION_DEFAULT is not set
++# CONFIG_LWIP_HOOK_DHCP_EXTRA_OPTION_CUSTOM is not set
+ CONFIG_LWIP_HOOK_NETCONN_EXT_RESOLVE_NONE=y
+ # CONFIG_LWIP_HOOK_NETCONN_EXT_RESOLVE_DEFAULT is not set
+ # CONFIG_LWIP_HOOK_NETCONN_EXT_RESOLVE_CUSTOM is not set
+@@ -1916,6 +2046,7 @@ CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT=y
+ # CONFIG_MBEDTLS_X509_TRUSTED_CERT_CALLBACK is not set
+ # CONFIG_MBEDTLS_SSL_CONTEXT_SERIALIZATION is not set
+ # CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE is not set
++# CONFIG_MBEDTLS_SSL_KEYING_MATERIAL_EXPORT is not set
+ CONFIG_MBEDTLS_PKCS7_C=y
+ # end of mbedTLS v3.x related
+ 
+@@ -2051,20 +2182,25 @@ CONFIG_MQTT_TRANSPORT_WEBSOCKET_SECURE=y
+ # end of ESP-MQTT Configurations
+ 
+ #
+-# Newlib
+-#
+-CONFIG_NEWLIB_STDOUT_LINE_ENDING_CRLF=y
+-# CONFIG_NEWLIB_STDOUT_LINE_ENDING_LF is not set
+-# CONFIG_NEWLIB_STDOUT_LINE_ENDING_CR is not set
+-# CONFIG_NEWLIB_STDIN_LINE_ENDING_CRLF is not set
+-# CONFIG_NEWLIB_STDIN_LINE_ENDING_LF is not set
+-CONFIG_NEWLIB_STDIN_LINE_ENDING_CR=y
+-CONFIG_NEWLIB_NANO_FORMAT=y
+-CONFIG_NEWLIB_TIME_SYSCALL_USE_RTC_HRT=y
+-# CONFIG_NEWLIB_TIME_SYSCALL_USE_RTC is not set
+-# CONFIG_NEWLIB_TIME_SYSCALL_USE_HRT is not set
+-# CONFIG_NEWLIB_TIME_SYSCALL_USE_NONE is not set
+-# end of Newlib
++# LibC
++#
++CONFIG_LIBC_NEWLIB=y
++# CONFIG_LIBC_PICOLIBC is not set
++CONFIG_LIBC_MISC_IN_IRAM=y
++CONFIG_LIBC_LOCKS_PLACE_IN_IRAM=y
++CONFIG_LIBC_STDOUT_LINE_ENDING_CRLF=y
++# CONFIG_LIBC_STDOUT_LINE_ENDING_LF is not set
++# CONFIG_LIBC_STDOUT_LINE_ENDING_CR is not set
++# CONFIG_LIBC_STDIN_LINE_ENDING_CRLF is not set
++# CONFIG_LIBC_STDIN_LINE_ENDING_LF is not set
++CONFIG_LIBC_STDIN_LINE_ENDING_CR=y
++CONFIG_LIBC_NEWLIB_NANO_FORMAT=y
++CONFIG_LIBC_TIME_SYSCALL_USE_RTC_HRT=y
++# CONFIG_LIBC_TIME_SYSCALL_USE_RTC is not set
++# CONFIG_LIBC_TIME_SYSCALL_USE_HRT is not set
++# CONFIG_LIBC_TIME_SYSCALL_USE_NONE is not set
++CONFIG_LIBC_ASSERT_BUFFER_SIZE=200
++# end of LibC
+ 
+ CONFIG_STDATOMIC_S32C1I_SPIRAM_WORKAROUND=y
+ 
+@@ -2087,6 +2223,8 @@ CONFIG_STDATOMIC_S32C1I_SPIRAM_WORKAROUND=y
+ #
+ # CONFIG_OPENTHREAD_SPINEL_ONLY is not set
+ # end of OpenThread Spinel
++
++# CONFIG_OPENTHREAD_DEBUG is not set
+ # end of OpenThread
+ 
+ #
+@@ -2147,6 +2285,7 @@ CONFIG_SPI_FLASH_HPM_DC_AUTO=y
+ CONFIG_SPI_FLASH_SUSPEND_TSUS_VAL_US=50
+ # CONFIG_SPI_FLASH_FORCE_ENABLE_XMC_C_SUSPEND is not set
+ # CONFIG_SPI_FLASH_FORCE_ENABLE_C6_H2_SUSPEND is not set
++CONFIG_SPI_FLASH_PLACE_FUNCTIONS_IN_IRAM=y
+ # end of Optional and Experimental Features (READ DOCS FIRST)
+ # end of Main Flash configuration
+ 
+@@ -2172,13 +2311,13 @@ CONFIG_SPI_FLASH_WRITE_CHUNK_SIZE=8192
+ #
+ # Auto-detect flash chips
+ #
+-CONFIG_SPI_FLASH_VENDOR_XMC_SUPPORTED=y
+-CONFIG_SPI_FLASH_VENDOR_GD_SUPPORTED=y
+-CONFIG_SPI_FLASH_VENDOR_ISSI_SUPPORTED=y
+-CONFIG_SPI_FLASH_VENDOR_MXIC_SUPPORTED=y
+-CONFIG_SPI_FLASH_VENDOR_WINBOND_SUPPORTED=y
+-CONFIG_SPI_FLASH_VENDOR_BOYA_SUPPORTED=y
+-CONFIG_SPI_FLASH_VENDOR_TH_SUPPORTED=y
++CONFIG_SPI_FLASH_VENDOR_XMC_SUPPORT_ENABLED=y
++CONFIG_SPI_FLASH_VENDOR_GD_SUPPORT_ENABLED=y
++CONFIG_SPI_FLASH_VENDOR_ISSI_SUPPORT_ENABLED=y
++CONFIG_SPI_FLASH_VENDOR_MXIC_SUPPORT_ENABLED=y
++CONFIG_SPI_FLASH_VENDOR_WINBOND_SUPPORT_ENABLED=y
++CONFIG_SPI_FLASH_VENDOR_BOYA_SUPPORT_ENABLED=y
++CONFIG_SPI_FLASH_VENDOR_TH_SUPPORT_ENABLED=y
+ CONFIG_SPI_FLASH_SUPPORT_ISSI_CHIP=y
+ CONFIG_SPI_FLASH_SUPPORT_MXIC_CHIP=y
+ CONFIG_SPI_FLASH_SUPPORT_GD_CHIP=y
+@@ -2261,6 +2400,7 @@ CONFIG_UNITY_ENABLE_DOUBLE=y
+ CONFIG_UNITY_ENABLE_IDF_TEST_RUNNER=y
+ # CONFIG_UNITY_ENABLE_FIXTURE is not set
+ # CONFIG_UNITY_ENABLE_BACKTRACE_ON_FAIL is not set
++# CONFIG_UNITY_TEST_ORDER_BY_FILE_PATH_AND_LINE is not set
+ # end of Unity unit testing library
+ 
+ #
+@@ -2904,6 +3044,8 @@ CONFIG_LVGL_VERSION_PATCH=0
+ # Deprecated options for backward compatibility
+ # CONFIG_APP_BUILD_TYPE_ELF_RAM is not set
+ # CONFIG_NO_BLOBS is not set
++CONFIG_APP_ROLLBACK_ENABLE=y
++# CONFIG_APP_ANTI_ROLLBACK is not set
+ CONFIG_LOG_BOOTLOADER_LEVEL_NONE=y
+ # CONFIG_LOG_BOOTLOADER_LEVEL_ERROR is not set
+ # CONFIG_LOG_BOOTLOADER_LEVEL_WARN is not set
+@@ -2911,8 +3053,6 @@ CONFIG_LOG_BOOTLOADER_LEVEL_NONE=y
+ # CONFIG_LOG_BOOTLOADER_LEVEL_DEBUG is not set
+ # CONFIG_LOG_BOOTLOADER_LEVEL_VERBOSE is not set
+ CONFIG_LOG_BOOTLOADER_LEVEL=0
+-CONFIG_APP_ROLLBACK_ENABLE=y
+-# CONFIG_APP_ANTI_ROLLBACK is not set
+ # CONFIG_FLASH_ENCRYPTION_ENABLED is not set
+ CONFIG_FLASHMODE_QIO=y
+ # CONFIG_FLASHMODE_QOUT is not set
+@@ -2940,7 +3080,9 @@ CONFIG_ESP32_APPTRACE_DEST_NONE=y
+ CONFIG_ESP32_APPTRACE_LOCK_ENABLE=y
+ # CONFIG_EXTERNAL_COEX_ENABLE is not set
+ # CONFIG_ESP_WIFI_EXTERNAL_COEXIST_ENABLE is not set
+-# CONFIG_MCPWM_ISR_IN_IRAM is not set
++# CONFIG_CAM_CTLR_DVP_CAM_ISR_IRAM_SAFE is not set
++# CONFIG_GPTIMER_ISR_IRAM_SAFE is not set
++# CONFIG_MCPWM_ISR_IRAM_SAFE is not set
+ # CONFIG_EVENT_LOOP_PROFILING is not set
+ CONFIG_POST_EVENTS_FROM_ISR=y
+ CONFIG_POST_EVENTS_FROM_IRAM_ISR=y
+@@ -2954,6 +3096,26 @@ CONFIG_ESP32S3_RTC_CLK_SRC_INT_RC=y
+ # CONFIG_ESP32S3_RTC_CLK_SRC_EXT_OSC is not set
+ # CONFIG_ESP32S3_RTC_CLK_SRC_INT_8MD256 is not set
+ CONFIG_ESP32S3_RTC_CLK_CAL_CYCLES=1024
++CONFIG_PERIPH_CTRL_FUNC_IN_IRAM=y
++CONFIG_BROWNOUT_DET=y
++CONFIG_ESP32S3_BROWNOUT_DET=y
++CONFIG_BROWNOUT_DET_LVL_SEL_7=y
++CONFIG_ESP32S3_BROWNOUT_DET_LVL_SEL_7=y
++# CONFIG_BROWNOUT_DET_LVL_SEL_6 is not set
++# CONFIG_ESP32S3_BROWNOUT_DET_LVL_SEL_6 is not set
++# CONFIG_BROWNOUT_DET_LVL_SEL_5 is not set
++# CONFIG_ESP32S3_BROWNOUT_DET_LVL_SEL_5 is not set
++# CONFIG_BROWNOUT_DET_LVL_SEL_4 is not set
++# CONFIG_ESP32S3_BROWNOUT_DET_LVL_SEL_4 is not set
++# CONFIG_BROWNOUT_DET_LVL_SEL_3 is not set
++# CONFIG_ESP32S3_BROWNOUT_DET_LVL_SEL_3 is not set
++# CONFIG_BROWNOUT_DET_LVL_SEL_2 is not set
++# CONFIG_ESP32S3_BROWNOUT_DET_LVL_SEL_2 is not set
++# CONFIG_BROWNOUT_DET_LVL_SEL_1 is not set
++# CONFIG_ESP32S3_BROWNOUT_DET_LVL_SEL_1 is not set
++CONFIG_BROWNOUT_DET_LVL=7
++CONFIG_ESP32S3_BROWNOUT_DET_LVL=7
++CONFIG_ESP_SYSTEM_BROWNOUT_INTR=y
+ CONFIG_ESP32_PHY_CALIBRATION_AND_DATA_STORAGE=y
+ # CONFIG_ESP32_PHY_INIT_DATA_IN_PARTITION is not set
+ CONFIG_ESP32_PHY_MAX_WIFI_TX_POWER=20
+@@ -2990,24 +3152,6 @@ CONFIG_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
+ CONFIG_TASK_WDT_CHECK_IDLE_TASK_CPU1=y
+ # CONFIG_ESP32_DEBUG_STUBS_ENABLE is not set
+ CONFIG_ESP32S3_DEBUG_OCDAWARE=y
+-CONFIG_BROWNOUT_DET=y
+-CONFIG_ESP32S3_BROWNOUT_DET=y
+-CONFIG_BROWNOUT_DET_LVL_SEL_7=y
+-CONFIG_ESP32S3_BROWNOUT_DET_LVL_SEL_7=y
+-# CONFIG_BROWNOUT_DET_LVL_SEL_6 is not set
+-# CONFIG_ESP32S3_BROWNOUT_DET_LVL_SEL_6 is not set
+-# CONFIG_BROWNOUT_DET_LVL_SEL_5 is not set
+-# CONFIG_ESP32S3_BROWNOUT_DET_LVL_SEL_5 is not set
+-# CONFIG_BROWNOUT_DET_LVL_SEL_4 is not set
+-# CONFIG_ESP32S3_BROWNOUT_DET_LVL_SEL_4 is not set
+-# CONFIG_BROWNOUT_DET_LVL_SEL_3 is not set
+-# CONFIG_ESP32S3_BROWNOUT_DET_LVL_SEL_3 is not set
+-# CONFIG_BROWNOUT_DET_LVL_SEL_2 is not set
+-# CONFIG_ESP32S3_BROWNOUT_DET_LVL_SEL_2 is not set
+-# CONFIG_BROWNOUT_DET_LVL_SEL_1 is not set
+-# CONFIG_ESP32S3_BROWNOUT_DET_LVL_SEL_1 is not set
+-CONFIG_BROWNOUT_DET_LVL=7
+-CONFIG_ESP32S3_BROWNOUT_DET_LVL=7
+ CONFIG_IPC_TASK_STACK_SIZE=1280
+ CONFIG_TIMER_TASK_STACK_SIZE=3584
+ CONFIG_ESP32_WIFI_ENABLED=y
+@@ -3033,7 +3177,6 @@ CONFIG_ESP32_WIFI_ENABLE_WPA3_SAE=y
+ CONFIG_ESP32_WIFI_ENABLE_WPA3_OWE_STA=y
+ CONFIG_WPA_MBEDTLS_CRYPTO=y
+ # CONFIG_WPA_WAPI_PSK is not set
+-# CONFIG_WPA_SUITE_B_192 is not set
+ # CONFIG_WPA_11KV_SUPPORT is not set
+ # CONFIG_WPA_MBO_SUPPORT is not set
+ # CONFIG_WPA_DPP_SUPPORT is not set
+@@ -3041,7 +3184,6 @@ CONFIG_WPA_MBEDTLS_CRYPTO=y
+ # CONFIG_WPA_WPS_SOFTAP_REGISTRAR is not set
+ # CONFIG_WPA_WPS_STRICT is not set
+ # CONFIG_WPA_DEBUG_PRINT is not set
+-# CONFIG_WPA_TESTING_OPTIONS is not set
+ # CONFIG_ESP32_ENABLE_COREDUMP_TO_FLASH is not set
+ # CONFIG_ESP32_ENABLE_COREDUMP_TO_UART is not set
+ CONFIG_ESP32_ENABLE_COREDUMP_TO_NONE=y
+@@ -3073,11 +3215,22 @@ CONFIG_TCPIP_TASK_AFFINITY_NO_AFFINITY=y
+ # CONFIG_TCPIP_TASK_AFFINITY_CPU1 is not set
+ CONFIG_TCPIP_TASK_AFFINITY=0x7FFFFFFF
+ # CONFIG_PPP_SUPPORT is not set
++CONFIG_NEWLIB_STDOUT_LINE_ENDING_CRLF=y
++# CONFIG_NEWLIB_STDOUT_LINE_ENDING_LF is not set
++# CONFIG_NEWLIB_STDOUT_LINE_ENDING_CR is not set
++# CONFIG_NEWLIB_STDIN_LINE_ENDING_CRLF is not set
++# CONFIG_NEWLIB_STDIN_LINE_ENDING_LF is not set
++CONFIG_NEWLIB_STDIN_LINE_ENDING_CR=y
++CONFIG_NEWLIB_NANO_FORMAT=y
++CONFIG_NEWLIB_TIME_SYSCALL_USE_RTC_HRT=y
+ CONFIG_ESP32S3_TIME_SYSCALL_USE_RTC_SYSTIMER=y
+ CONFIG_ESP32S3_TIME_SYSCALL_USE_RTC_FRC1=y
++# CONFIG_NEWLIB_TIME_SYSCALL_USE_RTC is not set
+ # CONFIG_ESP32S3_TIME_SYSCALL_USE_RTC is not set
++# CONFIG_NEWLIB_TIME_SYSCALL_USE_HRT is not set
+ # CONFIG_ESP32S3_TIME_SYSCALL_USE_SYSTIMER is not set
+ # CONFIG_ESP32S3_TIME_SYSCALL_USE_FRC1 is not set
++# CONFIG_NEWLIB_TIME_SYSCALL_USE_NONE is not set
+ # CONFIG_ESP32S3_TIME_SYSCALL_USE_NONE is not set
+ CONFIG_ESP32_PTHREAD_TASK_PRIO_DEFAULT=5
+ CONFIG_ESP32_PTHREAD_TASK_STACK_SIZE_DEFAULT=3072
+diff --git a/sdkconfig.defaults b/sdkconfig.defaults
+index 073f0ad..509ac14 100644
+--- a/sdkconfig.defaults
++++ b/sdkconfig.defaults
+@@ -83,3 +83,7 @@ CONFIG_LV_USE_WIN=n
+ CONFIG_LV_BUILD_EXAMPLES=n
+ CONFIG_LV_BUILD_DEMOS=n
+ 
++# ---- STAGE_A_OVERRIDE: 本机自建后台（由 tools/stage_a_build.py 写入）----
++CONFIG_OTA_URL="http://192.168.3.139:8003/xiaozhi/ota/"
++CONFIG_BOARD_TYPE_ESP32_S3N16R8_EMOJI=y
++# ---- /STAGE_A_OVERRIDE ----
