@@ -1,4 +1,3 @@
-warning: in the working copy of 'sdkconfig.defaults', LF will be replaced by CRLF the next time Git touches it
 diff --git a/dependencies.lock b/dependencies.lock
 index 0922260..d5e126d 100644
 --- a/dependencies.lock
@@ -726,7 +725,7 @@ index b7c2d25..cea40b3 100644
          // 复制表情字符串，因为它将在任务中使用
          char* emotion_copy = strdup(mapped_emotion.c_str());
 diff --git a/main/boards/esp32-s3n16r8-emoji/emoji_controller.cc b/main/boards/esp32-s3n16r8-emoji/emoji_controller.cc
-index 4cb6d73..5ff82b3 100644
+index 4cb6d73..ea2a22b 100644
 --- a/main/boards/esp32-s3n16r8-emoji/emoji_controller.cc
 +++ b/main/boards/esp32-s3n16r8-emoji/emoji_controller.cc
 @@ -38,7 +38,15 @@ void EmojiController::Initialize() {
@@ -755,7 +754,64 @@ index 4cb6d73..5ff82b3 100644
          this,                      // 任务参数
          5,                         // 任务优先级
          &animation_timer_task_handle_       // 任务句柄
-@@ -673,6 +681,11 @@ void EmojiController::ExecuteRandomAnimation() {
+@@ -137,13 +145,17 @@ void EmojiController::AnimationTask(void* pvParameters) {
+             }
+             
+             ESP_LOGI(TAG, "AnimationTask: 收到动画消息，类型: %d, 参数: %d", (int)msg.type, msg.param);
+-            
++
+             // 根据动画类型执行相应的动画
+             // 在执行动画前检查是否有其他动画正在执行
+-            if (controller->is_animating_) {
++            // （priority=手势反馈除外：它被自动动画挤掉就等于"设备不理我"，不能丢）
++            if (controller->is_animating_ && !msg.priority) {
+                 ESP_LOGW(TAG, "AnimationTask: 已有动画正在执行，跳过此次动画");
+                 continue;
+             }
++            if (controller->is_animating_ && msg.priority) {
++                ESP_LOGW(TAG, "AnimationTask: 手势反馈抢占，打断互斥等待");
++            }
+             
+             // 设置动画执行标志
+             controller->is_animating_ = true;
+@@ -568,20 +580,31 @@ bool EmojiController::SafeExecuteAnimation(std::function<void()> animation_func)
+     return true;
+ }
+ 
+-void EmojiController::PlayAnimation(AnimationType type, int param) {
+-    ESP_LOGI(TAG, "播放动画，类型: %d, 参数: %d", (int)type, param);
+-    
++void EmojiController::PlayAnimation(AnimationType type, int param, bool priority) {
++    ESP_LOGI(TAG, "播放动画，类型: %d, 参数: %d, 优先: %s", (int)type, param, priority ? "是" : "否");
++
+     // 检查动画队列是否已创建
+     if (animation_queue_ == nullptr) {
+         ESP_LOGE(TAG, "PlayAnimation: 动画队列未创建");
+         return;
+     }
+-    
++
+     // 创建动画消息
+     AnimationMessage msg;
+     msg.type = type;
+     msg.param = param;
+-    
++    msg.priority = priority;
++
++    if (priority) {
++        // 手势反馈：丢弃队列里积压的自动动画，把自己插到队首，
++        // 保证当前正在执行的动画一结束，下一个就是它（不等一队自动动画）。
++        xQueueReset(animation_queue_);
++        if (xQueueSendToFront(animation_queue_, &msg, 0) != pdPASS) {
++            ESP_LOGW(TAG, "PlayAnimation: 优先动画入队失败");
++        }
++        return;
++    }
++
+     // 发送动画消息到队列
+     if (xQueueSend(animation_queue_, &msg, 0) != pdPASS) {
+         ESP_LOGW(TAG, "PlayAnimation: 发送动画消息失败");
+@@ -673,6 +696,11 @@ void EmojiController::ExecuteRandomAnimation() {
      AnimationType type = SelectRandomAnimation();
      ESP_LOGI(TAG, "执行随机动画，类型: %d", static_cast<int>(type));
      
@@ -767,7 +823,7 @@ index 4cb6d73..5ff82b3 100644
      // 检查屏幕和眼睛对象是否存在
      if (emoji_screen_ == nullptr || left_eye_ == nullptr || right_eye_ == nullptr) {
          ESP_LOGW(TAG, "ExecuteRandomAnimation: 屏幕或眼睛对象不存在");
-@@ -3180,7 +3193,7 @@ void EmojiController::InitEmoji() {
+@@ -3180,7 +3208,7 @@ void EmojiController::InitEmoji() {
          BaseType_t task_created = xTaskCreate(
              AnimationTask,
              "AnimationTask",
@@ -776,7 +832,7 @@ index 4cb6d73..5ff82b3 100644
              this,
              5,
              &animation_task_handle_
-@@ -3196,7 +3209,7 @@ void EmojiController::InitEmoji() {
+@@ -3196,7 +3224,7 @@ void EmojiController::InitEmoji() {
          BaseType_t task_created = xTaskCreate(
              AnimationTimerTask,
              "AnimationTimerTask",
@@ -785,7 +841,7 @@ index 4cb6d73..5ff82b3 100644
              this,
              5,
              &animation_timer_task_handle_);
-@@ -3516,5 +3529,11 @@ void EmojiController::ExecuteCryAnimation() {
+@@ -3516,5 +3544,11 @@ void EmojiController::ExecuteCryAnimation() {
  
  // 暂停LVGL任务（空实现，防止链接错误）
  void EmojiController::SuspendLVGLTask() {
@@ -799,10 +855,27 @@ index 4cb6d73..5ff82b3 100644
 +    // 结论：保持空实现是刻意设计，非缺陷。
  }
 diff --git a/main/boards/esp32-s3n16r8-emoji/emoji_controller.h b/main/boards/esp32-s3n16r8-emoji/emoji_controller.h
-index d00a8ca..ca06d0c 100644
+index d00a8ca..d9bf360 100644
 --- a/main/boards/esp32-s3n16r8-emoji/emoji_controller.h
 +++ b/main/boards/esp32-s3n16r8-emoji/emoji_controller.h
-@@ -235,6 +235,14 @@ public:
+@@ -54,6 +54,7 @@ enum class AnimationType {
+ struct AnimationMessage {
+     AnimationType type;  // 动画类型
+     int param;          // 动画参数（如速度）
++    bool priority;      // true=手势反馈：清队插队首，且无视"已有动画"互斥（2026-10-13）
+ };
+ 
+ /**
+@@ -203,7 +204,7 @@ public:
+      * @param type 动画类型
+      * @param param 动画参数
+      */
+-    void PlayAnimation(AnimationType type, int param = 0);
++    void PlayAnimation(AnimationType type, int param = 0, bool priority = false);
+     
+     /**
+      * @brief 启动眨眼定时器（兼容旧接口）
+@@ -235,6 +236,14 @@ public:
          servo_controller_ = servo_controller;
      }
      
@@ -817,7 +890,7 @@ index d00a8ca..ca06d0c 100644
      /**
       * @brief 获取表情屏幕
       * @return LVGL屏幕对象
-@@ -309,6 +317,9 @@ private:
+@@ -309,6 +318,9 @@ private:
      // 动画执行标志，用于防止多个动画同时执行
      bool is_animating_ = false;
      
@@ -828,10 +901,123 @@ index d00a8ca..ca06d0c 100644
      bool lvgl_task_suspended_ = false;
      UBaseType_t saved_lvgl_task_priority_ = 0;
 diff --git a/main/boards/esp32-s3n16r8-emoji/gesture_sensor.cc b/main/boards/esp32-s3n16r8-emoji/gesture_sensor.cc
-index 76a8074..1f98d40 100644
+index 76a8074..a06e907 100644
 --- a/main/boards/esp32-s3n16r8-emoji/gesture_sensor.cc
 +++ b/main/boards/esp32-s3n16r8-emoji/gesture_sensor.cc
-@@ -846,6 +846,12 @@ void GestureSensor::GestureTaskFunction(void* pvParameters) {
+@@ -6,6 +6,7 @@
+ #include "gesture_sensor.h"
+ #include "servo_controller.h"
+ #include "emoji_controller.h"
++#include "application.h"
+ #include <esp_log.h>
+ 
+ #define TAG "GestureSensor"
+@@ -71,7 +72,12 @@ const uint8_t initRegisterArray[][2] = {
+     {0x6C, 0x04}, {0x6D, 0x2C}, {0x6E, 0x01}, {0x6F, 0x32},
+     {0x71, 0x00}, {0x72, 0x01}, {0x73, 0x35}, {0x74, 0x00},
+     {0x75, 0x33}, {0x76, 0x31}, {0x77, 0x01}, {0x7C, 0x84},
+-    {0x7D, 0x03}, {0x7E, 0x01}
++    {0x7D, 0x03}, {0x7E, 0x01},
++    {0xEF, 0x00}   // ★ 2026-10-13：序列收尾必须切回 bank 0。
++                   //   上游此序列第113条切去 bank 1 后，之后 104 条都在
++                   //   bank 1 写、结尾不回 bank 0；而手势标志寄存器
++                   //   0x43/0x44 只在 bank 0 有效——这是"传感器初始化
++                   //   全部成功却永远读不到手势"的隐患根因。
+ };
+ 
+ // 传感器复位序列
+@@ -442,7 +448,13 @@ bool GestureSensor::Initialize() {
+ 
+ GestureType GestureSensor::ReadGesture() {
+     uint8_t data0 = 0, data1 = 0;
+-    
++
++    // ★ 2026-10-13：手势标志寄存器 0x43/0x44 只在 bank 0 有效。
++    //   上游初始化序列第113条切去 bank 1 后再没切回（激活序列虽在开头
++    //   切回 bank 0，但序列自身不自洽就是隐患）。这里每次读前再确保
++    //   一次，任何路径把 bank 落在 1 上都不会再"传感器正常却读不到手势"。
++    WriteRegister(PAJ7620_REGITER_BANK_SEL, PAJ7620_BANK0);
++
+     // 紧急修复：简化错误处理，避免栈溢出
+     esp_err_t result0 = ReadRegister(PAJ7620_ADDR_GES_PS_DET_FLAG_0, &data0);
+     if (result0 != ESP_OK) {
+@@ -476,31 +488,44 @@ GestureType GestureSensor::ReadGesture() {
+         return GESTURE_NONE;
+     }
+     
+-    // 简化状态检查，减少栈使用
++    // ★ 2026-10-13 心跳日志：50ms 一轮，每 100 轮（约5秒）打一次原始
++    //   寄存器值。排查"手势无反应"时用它区分：寄存器到底动没动。
++    //   附带接近感应（红外测距）原始值：手放前面它必须跳变——
++    //   跳了=红外收发活着（是识别算法没触发）；死0=红外层面就死了（供电/排线/本体）。
+     static int debug_counter = 0;
+-    if (++debug_counter % 1000 == 0) {  // 减少日志频率
+-        ESP_LOGI(TAG, "手势检测状态 - 循环%d次", debug_counter);
++    if (++debug_counter % 100 == 0) {
++        uint8_t ps_state = 0, ps_raw = 0, state_ind = 0;
++        ReadRegister(PAJ7620_ADDR_PS_APPROACH_STATE, &ps_state);
++        ReadRegister(PAJ7620_ADDR_PS_RAW_DATA, &ps_raw);
++        ReadRegister(PAJ7620_ADDR_STATE_INDICATOR, &state_ind);
++        ESP_LOGI(TAG, "手势诊断心跳 - 循环%d次, flag0=0x%02X flag1=0x%02X, 接近状态=0x%02X 接近原始=%u 状态指示=0x%02X",
++                 debug_counter, data0, data1, ps_state, (unsigned)ps_raw, state_ind);
+     }
+-    
+-    // 简化手势检测逻辑，减少复杂日志
++
++    // ★ 2026-10-13 诊断日志：有数据先落日志再走过滤。
++    //   此前被 >0x3F 滤掉时现场无痕，分不清"没检测到"还是"检测到被滤"。
+     if (data0 != 0 || data1 != 0) {
+-        // 过滤器常见的噪声数据
++        ESP_LOGI(TAG, "手势寄存器原始值: flag0=0x%02X flag1=0x%02X", data0, data1);
++        // 过滤噪声：bit6/bit7 = 顺时针/逆时针，当前映射未支持
+         if (data0 > 0x3F) {
+             return GESTURE_NONE;
+         }
+     }
+-    
++
+     // 简化手势映射，减少日志输出
+     GestureType detected_gesture = GESTURE_NONE;
+-    
+-    // 简化方向映射（根据实际测试结果）
+-    if (data0 & GES_DOWN_FLAG) {
++
++    // ★ 2026-10-13 方向映射修正：此前 DOWN_FLAG→判右、UP_FLAG→判左、
++    //   LEFT_FLAG→判上、RIGHT_FLAG→判下，左右上下整个拧掉（上游缺陷，
++    //   会导致"向左挥手头往右转"）。PAJ7620 flag_0 位序：
++    //   bit0=右 bit1=左 bit2=上 bit3=下 bit4=前 bit5=后。
++    if (data0 & GES_RIGHT_FLAG) {
+         detected_gesture = GESTURE_RIGHT;
+-    } else if (data0 & GES_UP_FLAG) {
+-        detected_gesture = GESTURE_LEFT;
+     } else if (data0 & GES_LEFT_FLAG) {
++        detected_gesture = GESTURE_LEFT;
++    } else if (data0 & GES_UP_FLAG) {
+         detected_gesture = GESTURE_UP;
+-    } else if (data0 & GES_RIGHT_FLAG) {
++    } else if (data0 & GES_DOWN_FLAG) {
+         detected_gesture = GESTURE_DOWN;
+     } else if (data0 & GES_FORWARD_FLAG) {
+         detected_gesture = GESTURE_FORWARD;
+@@ -838,7 +863,16 @@ void GestureSensor::GestureTaskFunction(void* pvParameters) {
+         
+         if (gesture != GESTURE_NONE) {
+             ESP_LOGI(TAG, "检测到手势: %d，立即处理", gesture);
+-            
++
++            // ★ 舵机仲裁（2026-10-13）：手势处理全程持有舵机控制权，
++            //   期间自动表情动画的舵机写入抢不到锁、自动让位——
++            //   这就是"手一过去电机就跟我"的实现。拿不到也照做（最坏退化为旧行为）。
++            bool has_servo_lock = false;
++            if (sensor->servo_controller_) {
++                has_servo_lock = sensor->servo_controller_->AcquireControl(3000);
++                ESP_LOGI(TAG, "舵机控制权: %s", has_servo_lock ? "已获取(手势优先)" : "超时(仍继续)");
++            }
++
+             // 参考deskemoji：检测到手势后立即复位舵机位置
+             if (sensor->servo_controller_) {
+                 sensor->servo_controller_->HeadCenter();
+@@ -846,6 +880,17 @@ void GestureSensor::GestureTaskFunction(void* pvParameters) {
              
              // 立即处理手势，无需额外延迟
              sensor->ProcessGesture(gesture);
@@ -841,11 +1027,142 @@ index 76a8074..1f98d40 100644
 +            //   属于彻底的死代码 —— 这正是"左右/上下摇摆不生效"的根因（2026-10-03）。
 +            sensor->CheckSequentialGestures(gesture);
 +
++            if (has_servo_lock && sensor->servo_controller_) {
++                sensor->servo_controller_->ReleaseControl();
++                ESP_LOGI(TAG, "舵机控制权已释放，自动动画恢复");
++            }
++
              success_count++;
              
              // 手势处理后的短暂延迟，防止重复触发
+@@ -887,7 +932,7 @@ void GestureSensor::ProcessGesture(GestureType gesture) {
+         case GESTURE_LEFT:
+             ESP_LOGI(TAG, "执行动作：向左手势 -> 头部向左看表情");
+             if (emoji_controller_) {
+-                emoji_controller_->PlayAnimation(AnimationType::LOOK_LEFT);
++                emoji_controller_->PlayAnimation(AnimationType::LOOK_LEFT, 0, true);  // priority：手势反馈不被自动动画吞
+             }
+             servo_controller_->HeadLeft(30);
+             vTaskDelay(pdMS_TO_TICKS(1000));  // 减少到1秒
+@@ -897,7 +942,7 @@ void GestureSensor::ProcessGesture(GestureType gesture) {
+         case GESTURE_RIGHT:
+             ESP_LOGI(TAG, "执行动作：向右手势 -> 头部向右看表情");
+             if (emoji_controller_) {
+-                emoji_controller_->PlayAnimation(AnimationType::LOOK_RIGHT);
++                emoji_controller_->PlayAnimation(AnimationType::LOOK_RIGHT, 0, true);
+             }
+             servo_controller_->HeadRight(30);
+             vTaskDelay(pdMS_TO_TICKS(1000));
+@@ -907,12 +952,12 @@ void GestureSensor::ProcessGesture(GestureType gesture) {
+         case GESTURE_UP:
+             ESP_LOGI(TAG, "执行动作：向上手势 -> 抬头表情");
+             if (emoji_controller_) {
+-                emoji_controller_->EyeUp();
++                emoji_controller_->PlayAnimation(AnimationType::THINKING, 0, true);
+             }
+             servo_controller_->HeadUp(25);
+             vTaskDelay(pdMS_TO_TICKS(1000));
+             if (emoji_controller_) {
+-                emoji_controller_->EyeCenter();
++                emoji_controller_->PlayAnimation(AnimationType::BLINK, 12, true);
+             }
+             servo_controller_->HeadCenter();  // 恢复到中心位置
+             break;
+@@ -920,31 +965,45 @@ void GestureSensor::ProcessGesture(GestureType gesture) {
+         case GESTURE_DOWN:
+             ESP_LOGI(TAG, "执行动作：向下手势 -> 低头表情");
+             if (emoji_controller_) {
+-                emoji_controller_->EyeDown();
++                emoji_controller_->PlayAnimation(AnimationType::SLEEP, 0, true);
+             }
+             servo_controller_->HeadDown(25);
+             vTaskDelay(pdMS_TO_TICKS(1000));
+             if (emoji_controller_) {
+-                emoji_controller_->EyeCenter();
++                emoji_controller_->PlayAnimation(AnimationType::BLINK, 12, true);
+             }
+             servo_controller_->HeadCenter();  // 恢复到中心位置
+             break;
+             
+         case GESTURE_FORWARD:
+-            ESP_LOGI(TAG, "执行动作：向前手势 -> 惊讶表情 + 启动聊天");
+-            if (emoji_controller_) {
+-                emoji_controller_->PlayAnimation(AnimationType::SURPRISE);
+-                emoji_controller_->EyeBlink();
++            // ★ 2026-10-13：接上设计者预留的线（原注释 start_chat = true）。
++            //   向前推 = 语音互动开关：非聆听态进入聆听（播报中会先打断播报），
++            //   聆听态再推一次退出回待机。不用喊唤醒词，伸手就能聊。
++            ESP_LOGI(TAG, "执行动作：向前手势 -> 语音互动开关");
++            {
++                auto& app = Application::GetInstance();
++                DeviceState st = app.GetDeviceState();
++                if (st == kDeviceStateListening) {
++                    ESP_LOGI(TAG, "当前在聆听中 -> 退出聆听，回待机");
++                    app.StopListening();
++                    if (emoji_controller_) {
++                        emoji_controller_->PlayAnimation(AnimationType::SLEEP, 0, true);
++                    }
++                } else {
++                    ESP_LOGI(TAG, "当前状态=%d -> 进入聆听（可直接说话）", (int)st);
++                    app.StartListening();
++                    if (emoji_controller_) {
++                        emoji_controller_->PlayAnimation(AnimationType::THINKING, 0, true);
++                    }
++                }
+             }
+-            // 参考deskemoji: 向前手势可以触发特殊功能（如启动语音交互）
+-            // start_chat = true; // 这里可以添加启动语音交互的逻辑
+-            vTaskDelay(pdMS_TO_TICKS(1500));
++            vTaskDelay(pdMS_TO_TICKS(800));
+             break;
+             
+         case GESTURE_BACKWARD:
+             ESP_LOGI(TAG, "执行动作：向后手势 -> 简单眨眼");
+             if (emoji_controller_) {
+-                emoji_controller_->EyeBlink();
++                emoji_controller_->PlayAnimation(AnimationType::BLINK, 12, true);
+             }
+             vTaskDelay(pdMS_TO_TICKS(500));
+             break;
+@@ -952,11 +1011,11 @@ void GestureSensor::ProcessGesture(GestureType gesture) {
+         case GESTURE_WAVE:
+             ESP_LOGI(TAG, "执行动作：挥手手势 -> 开心表情 + 摇头");
+             if (emoji_controller_) {
+-                emoji_controller_->PlayAnimation(AnimationType::HAPPY);
++                emoji_controller_->PlayAnimation(AnimationType::HAPPY, 0, true);
+             }
+             servo_controller_->HeadShake(3);  // 摇头3次
+             if (emoji_controller_) {
+-                emoji_controller_->EyeBlink();
++                emoji_controller_->PlayAnimation(AnimationType::BLINK, 12, true);
+             }
+             servo_controller_->HeadCenter();  // 恢复到中心位置
+             break;
+@@ -964,11 +1023,11 @@ void GestureSensor::ProcessGesture(GestureType gesture) {
+         case GESTURE_CLOCKWISE:
+             ESP_LOGI(TAG, "执行动作：顺时针手势 -> 开心表情");
+             if (emoji_controller_) {
+-                emoji_controller_->PlayAnimation(AnimationType::HAPPY);
++                emoji_controller_->PlayAnimation(AnimationType::HAPPY, 0, true);
+             }
+             servo_controller_->HeadCenter();
+             if (emoji_controller_) {
+-                emoji_controller_->EyeBlink();
++                emoji_controller_->PlayAnimation(AnimationType::BLINK, 12, true);
+             }
+             break;
+             
+@@ -976,7 +1035,7 @@ void GestureSensor::ProcessGesture(GestureType gesture) {
+             ESP_LOGI(TAG, "执行动作：逆时针手势 -> 随机动画");
+             if (emoji_controller_) {
+                 // 参考deskemoji的随机动画功能
+-                emoji_controller_->PlayAnimation(AnimationType::RANDOM);
++                emoji_controller_->PlayAnimation(AnimationType::RANDOM, 0, true);
+             }
+             break;
+             
 diff --git a/main/boards/esp32-s3n16r8-emoji/servo_controller.cc b/main/boards/esp32-s3n16r8-emoji/servo_controller.cc
-index 34d02d3..33382b0 100644
+index 34d02d3..cb3b3df 100644
 --- a/main/boards/esp32-s3n16r8-emoji/servo_controller.cc
 +++ b/main/boards/esp32-s3n16r8-emoji/servo_controller.cc
 @@ -15,6 +15,10 @@ ServoController::~ServoController() {
@@ -859,14 +1176,23 @@ index 34d02d3..33382b0 100644
      // 配置LEDC定时器
      ledc_timer_config_t ledc_timer = {
          .speed_mode = LEDC_MODE,
-@@ -42,8 +46,23 @@ void ServoController::Initialize() {
+@@ -39,12 +43,61 @@ void ServoController::Initialize() {
+         ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
+     }
+ 
++    // 创建舵机写入递归互斥锁（仲裁层，见头文件注释）
++    servo_mutex_ = xSemaphoreCreateRecursiveMutex();
++    if (servo_mutex_ == nullptr) {
++        ESP_LOGW(TAG, "舵机互斥锁创建失败，退化为无锁直写（不致命，但会丢仲裁）");
++    }
++
      // 设置舵机初始位置
      SetServoAngle(0, SERVO_CENTER_X);
      SetServoAngle(1, SERVO_CENTER_Y);
 +    ESP_LOGI(TAG, "舵机已归中：水平=%d° 垂直=%d°（若此前不在中位，这一刻会看到舵机动一下）",
 +             current_x_angle_, current_y_angle_);
- }
- 
++}
++
 +void ServoController::SelfTest() {
 +    // 开机可见动作：左 15° → 右 15° → 回中，全程约 0.6s。
 +    // 作用有两个：① 让主人一眼确认"舵机是活的"；
@@ -880,14 +1206,115 @@ index 34d02d3..33382b0 100644
 +}
 +
 +
- void ServoController::SetServoAngle(int channel, int angle) {
++bool ServoController::AcquireControl(uint32_t timeout_ms) {
++    if (servo_mutex_ == nullptr) {
++        return true;  // 无锁退化模式：视为永远拿到
++    }
++    if (xSemaphoreTakeRecursive(servo_mutex_, pdMS_TO_TICKS(timeout_ms)) == pdTRUE) {
++        return true;
++    }
++    ESP_LOGW(TAG, "舵机控制权获取超时(%ums)，仍按当前调用继续", (unsigned)timeout_ms);
++    return false;
+ }
+ 
+-void ServoController::SetServoAngle(int channel, int angle) {
++void ServoController::ReleaseControl() {
++    if (servo_mutex_ == nullptr) {
++        return;
++    }
++    xSemaphoreGiveRecursive(servo_mutex_);
++}
++
++bool ServoController::SetServoAngle(int channel, int angle) {
++    // 仲裁：自动动画与手势争舵机时，抢不到锁（持锁者=手势）就放弃本次写入，
++    // 由调用方的循环检测返回值 break，实现"手势优先、动画让位"。
++    bool locked = false;
++    if (servo_mutex_ != nullptr) {
++        if (xSemaphoreTakeRecursive(servo_mutex_, pdMS_TO_TICKS(50)) != pdTRUE) {
++            return false;
++        }
++        locked = true;
++    }
++
      // 限制角度范围
      if (channel == 0) { // 水平舵机
+         angle = std::max(SERVO_MIN_X, std::min(SERVO_MAX_X, angle));
+@@ -61,6 +114,11 @@ void ServoController::SetServoAngle(int channel, int angle) {
+     // 设置PWM占空比
+     ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, servo_channels[channel], duty));
+     ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, servo_channels[channel]));
++
++    if (locked) {
++        xSemaphoreGiveRecursive(servo_mutex_);
++    }
++    return true;
+ }
+ 
+ void ServoController::HeadMove(int x_offset, int y_offset, int servo_delay) {
+@@ -76,11 +134,11 @@ void ServoController::HeadMove(int x_offset, int y_offset, int servo_delay) {
+     while (x_angle != to_x_angle || y_angle != to_y_angle) {
+         if (x_angle != to_x_angle) {
+             x_angle += (to_x_angle > x_angle ? SERVO_STEP : -SERVO_STEP);
+-            SetServoAngle(0, x_angle);
++            if (!SetServoAngle(0, x_angle)) break;  // 仲裁让位：手势在控制，本动画收工
+         }
+         if (y_angle != to_y_angle) {
+             y_angle += (to_y_angle > y_angle ? SERVO_STEP : -SERVO_STEP);
+-            SetServoAngle(1, y_angle);
++            if (!SetServoAngle(1, y_angle)) break;
+         }
+         vTaskDelay(pdMS_TO_TICKS(servo_delay));
+     }
+@@ -99,12 +157,12 @@ void ServoController::HeadNod(int servo_delay) {
+     // 直接设置舵机角度，不使用HeadMove的逐步移动
+     for (int i = 0; i < 3; i++) {
+         // 向下点头
+-        SetServoAngle(1, SERVO_CENTER_Y + 20);
++        if (!SetServoAngle(1, SERVO_CENTER_Y + 20)) return;  // 仲裁让位即收工
+         current_y_angle_ = SERVO_CENTER_Y + 20;
+         vTaskDelay(pdMS_TO_TICKS(delay_ms));  // 使用参数控制的延时
+-        
++
+         // 向上点头
+-        SetServoAngle(1, SERVO_CENTER_Y - 20);
++        if (!SetServoAngle(1, SERVO_CENTER_Y - 20)) return;
+         current_y_angle_ = SERVO_CENTER_Y - 20;
+         vTaskDelay(pdMS_TO_TICKS(delay_ms));  // 使用参数控制的延时
+     }
+@@ -127,17 +185,17 @@ void ServoController::HeadShake(int servo_delay) {
+     // 直接设置舵机角度，不使用HeadMove的逐步移动
+     for (int i = 0; i < 2; i++) {
+         // 向左摇头
+-        SetServoAngle(0, SERVO_CENTER_X - 20);
++        if (!SetServoAngle(0, SERVO_CENTER_X - 20)) return;  // 仲裁让位即收工
+         current_x_angle_ = SERVO_CENTER_X - 20;
+         vTaskDelay(pdMS_TO_TICKS(delay_ms));  // 使用参数控制的延时
+         
+         // 向右摇头
+-        SetServoAngle(0, SERVO_CENTER_X + 20);
++        if (!SetServoAngle(0, SERVO_CENTER_X + 20)) return;
+         current_x_angle_ = SERVO_CENTER_X + 20;
+         vTaskDelay(pdMS_TO_TICKS(delay_ms));  // 使用参数控制的延时
+         
+         // 再向左摇头
+-        SetServoAngle(0, SERVO_CENTER_X - 20);
++        if (!SetServoAngle(0, SERVO_CENTER_X - 20)) return;
+         current_x_angle_ = SERVO_CENTER_X - 20;
+         vTaskDelay(pdMS_TO_TICKS(delay_ms));  // 使用参数控制的延时
+     }
 diff --git a/main/boards/esp32-s3n16r8-emoji/servo_controller.h b/main/boards/esp32-s3n16r8-emoji/servo_controller.h
-index 069fc5b..bc9019f 100644
+index 069fc5b..d007ed5 100644
 --- a/main/boards/esp32-s3n16r8-emoji/servo_controller.h
 +++ b/main/boards/esp32-s3n16r8-emoji/servo_controller.h
-@@ -41,6 +41,14 @@ public:
+@@ -11,6 +11,7 @@
+ #include <driver/ledc.h>
+ #include <freertos/FreeRTOS.h>
+ #include <freertos/task.h>
++#include <freertos/semphr.h>
+ #include <algorithm>
+ 
+ // 舵机相关常量，使用board_config.h中已定义的常量
+@@ -41,13 +42,22 @@ public:
       * @brief 初始化舵机控制器
       */
      void Initialize();
@@ -902,6 +1329,36 @@ index 069fc5b..bc9019f 100644
      
      /**
       * @brief 设置舵机角度
+      * @param channel 舵机通道 (0:水平, 1:垂直)
+      * @param angle 角度 (0-180)
++     * @return 是否真正写入；false = 仲裁让位（控制权被手势持着）
+      */
+-    void SetServoAngle(int channel, int angle);
++    bool SetServoAngle(int channel, int angle);
+     
+     /**
+      * @brief 移动头部
+@@ -117,8 +127,20 @@ public:
+      */
+     int GetCurrentYAngle() const { return current_y_angle_; }
+ 
++    // ---- 舵机仲裁层（2026-10-13 新增）----
++    // 背景：手势任务和自动表情动画都在直接写舵机角度，没有任何互斥，
++    // 同时跑就互相打架（表现：舵机在动但不跟手势）。
++    // 规则：所有角度写入经过递归互斥锁串行化；手势处理期间持锁，
++    // 自动动画抢不到锁（50ms 超时）即让位收工，保证"手势优先"。
++    // 用递归锁是因为手势持锁后调的 HeadLeft() 内部还会再过 SetServoAngle。
++    bool AcquireControl(uint32_t timeout_ms);
++    void ReleaseControl();
++
+ private:
+     // 舵机角度
+     int current_x_angle_ = SERVO_CENTER_X;
+     int current_y_angle_ = SERVO_CENTER_Y;
++
++    // 舵机写入递归互斥锁（nullptr = 未初始化，退化为无锁直写）
++    SemaphoreHandle_t servo_mutex_ = nullptr;
+ };
 diff --git a/main/display/oled_display.cc b/main/display/oled_display.cc
 index 66dee40..c433775 100644
 --- a/main/display/oled_display.cc
