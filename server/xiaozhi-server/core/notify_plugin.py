@@ -408,13 +408,37 @@ def speak(text: str, device_id: str = None) -> tuple:
 
 
 def enqueue(text: str, tag: str = "") -> int:
-    """设备离线时把话排队，上线后自动补播。返回队列长度。"""
+    """设备离线时把话排队，上线后自动补播。返回队列长度。
+
+    ★ 2026-10-13 修「补播风暴」：离线 5 天积压 59 条，上线 2 分钟全刷完，
+      把 TTS 免费额度（20000 字符）烧到只剩 545。
+
+      根因：待办巡检每 10 分钟判一次「需要提醒」，而窗口外**不打 reminded_at 戳**
+      （打戳会导致白天该念的永远不念），于是每次巡检都重新入队一条，
+      文本里「已经过期 N 天」的 N 还在涨 → 纯文本比对去不了重。
+
+      去重键 = tag + 文本前 14 字：
+        - 同一待办：前缀「嗨，提醒一下，给手机换新膜」稳定，天数变化在后段 → 命中
+        - 不同待办：前缀不同 → 不误伤
+      命中则**整条替换**（保留最新状态，比如最新的剩余天数）。
+    """
     text = (text or "").strip()
     if not text:
         return len(_queue)
-    _queue.append(
-        {"text": text, "tag": tag, "at": datetime.now().isoformat(timespec="seconds")}
-    )
+    item = {"text": text, "tag": tag, "at": datetime.now().isoformat(timespec="seconds")}
+    key = f"{tag}|{text[:14]}"
+    for i, old in enumerate(_queue):
+        if f"{old.get('tag','')}|{str(old.get('text',''))[:14]}" == key:
+            _queue[i] = item          # 同源消息只留最新一条
+            _queue_save()
+            return len(_queue)
+    _queue.append(item)
+    # 兜底：队列超过 30 条说明去重没兜住，丢最旧的（宁可少念也别把额度烧穿）
+    if len(_queue) > 30:
+        dropped = _queue.pop(0)
+        logger.bind(tag=TAG).warning(
+            f"[队列超限] 丢弃最旧一条（tag={dropped.get('tag','')}），当前 {len(_queue)} 条"
+        )
     _queue_save()
     return len(_queue)
 
@@ -559,7 +583,13 @@ def speak_or_queue(text: str, tag: str = "") -> tuple:
 
 
 async def _drain_queue():
-    """常驻循环：设备上线后把排队的话补播出去。"""
+    """常驻循环：设备上线后把排队的话补播出去。
+
+    ★ 2026-10-13：补播间隔从「一轮全播完」改为**每条之间停 6 秒**。
+      起因：离线 5 天积压 59 条，设备一上线 2 分钟内全刷完（每 2 秒一条），
+      用户被连续轰炸，TTS 额度也瞬间见底。
+      去重已经把积压量压下来了，这里再限流：宁可慢点念完，也别一上来机关枪。
+    """
     while True:
         try:
             # 免打扰时段一律不补播（否则设备在线，队列会被马上播掉，静默形同虚设）。
@@ -577,6 +607,7 @@ async def _drain_queue():
                         )
                     else:
                         left.append(item)
+                    await asyncio.sleep(6)   # 每条之间留间隔，别机关枪
                 _queue[:] = left
                 _queue_save()
         except Exception as e:

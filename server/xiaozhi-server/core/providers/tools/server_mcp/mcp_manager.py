@@ -53,8 +53,11 @@ class ServerMCPManager:
             # 初始化服务端MCP客户端
             logger.bind(tag=TAG).info(f"初始化服务端MCP客户端: {name}")
             client = ServerMCPClient(srv_config)
-            # 设置超时时间10秒
-            await asyncio.wait_for(client.initialize(logging_callback=self.logging_callback), timeout=10)
+            # 超时 10→45 秒（2026-10-13 改）。
+            # 上游写死 10 秒是给 npx 类云端 MCP 用的；我们的自研 MCP（local/pc/life）
+            # 要 import mcp 包 + pydantic（约 5.6s）+ server_agent（约 1.6s），
+            # 三个并行冷启动实测 77 秒（串行）/ 卡在 10 秒边界（并行）→ 全部 Timeout。
+            await asyncio.wait_for(client.initialize(logging_callback=self.logging_callback), timeout=45)
 
             # 使用锁保护共享状态的修改
             async with self._init_lock:

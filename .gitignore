@@ -73,3 +73,6 @@ _download/
 
 # 运行时数据
 bridge/quota.json
+
+# 运行时状态（蒸馏进度等）
+bridge/distill_state.json

@@ -25,6 +25,9 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parent
 FILE = BASE / "quota.json"
 
+# 低水位比例：剩余额度低于该比例就提前切到下一通道（2026-10-13 加）
+_LOW_RATIO = 0.05
+
 # 通道定义：rid + 各自的默认音色 + 额度上限（控制台截图值）
 CHANNELS = {
     "2.0": {
@@ -107,6 +110,10 @@ def remaining(ch: str) -> dict:
     total = int(rec.get("quota") or CHANNELS.get(ch, {}).get("quota", 0))
     used = int(rec.get("used", 0))
     left = max(0, total - used)
+    # ★ 2026-10-13：低水位提前切换。此前 exhausted 只看 left<=0，
+    #   结果 2.0 剩 545 字符时仍被 pick_channel 选中，再说 8 句就归零，
+    #   用户会在一句话说到一半时突然换音色（自动兜底虽不哑，但体验断裂）。
+    #   低于 5% 就视为"该换了"，让切换发生在开口之前。
     return {
         "channel": ch,
         "name": CHANNELS.get(ch, {}).get("name", ch),
@@ -117,6 +124,7 @@ def remaining(ch: str) -> dict:
         "remaining": left,
         "percent": round(left / total * 100, 1) if total else 0.0,
         "exhausted": left <= 0,
+        "low": total > 0 and 0 < left <= total * _LOW_RATIO,
     }
 
 
@@ -151,10 +159,10 @@ def mark_alerted(ch: str):
 
 
 def pick_channel() -> str | None:
-    """按优先级挑还能用的通道：2.0 优先，用完自动落到 1.0。都没有则 None。"""
+    """按优先级挑还能用的通道：2.0 优先，低于低水位或用完自动落到 1.0。都没有则 None。"""
     for ch, meta in sorted(CHANNELS.items(), key=lambda kv: kv[1]["order"]):
         info = remaining(ch)
-        if not info["exhausted"]:
+        if not (info["exhausted"] or info["low"]):
             return ch
     return None
 
