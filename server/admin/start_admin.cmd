@@ -11,7 +11,9 @@ REM  注意：本文件必须 CRLF 行尾，改动后用 tools/fix_cmd_encoding.
 REM ============================================================
 
 set "PY="
-for %%P in ("C:\Users\zuowe\.workbuddy\binaries\python\versions\3.13.12\python.exe" "C:\Users\zuowe\.workbuddy\binaries\python\envs\xiaozhi-server\Scripts\python.exe") do if not defined PY if exist %%P set "PY=%%~P"
+for %%P in ("C:\Users\zuowe\.workbuddy\binaries\python\envs\xiaozhi-server\Scripts\python.exe" "C:\Users\zuowe\.workbuddy\binaries\python\versions\3.13.12\python.exe") do if not defined PY if exist %%P set "PY=%%~P"
+if not defined PY where py >nul 2>&1 && set "PY=py -3"
+if not defined PY where python >nul 2>&1 && set "PY=python"
 if not defined PY set "PY=python"
 
 cd /d "%~dp0"

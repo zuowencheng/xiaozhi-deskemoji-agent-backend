@@ -21,14 +21,18 @@ import time
 
 # ---- 路径 ----
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
-SRV_DIR = os.path.join(ROOT, "server", "xiaozhi-server")
-ADMIN_DIR = os.path.join(ROOT, "server", "admin")
-LOG_DIR = os.path.join(ROOT, "server", "_logs")
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+import paths  # 统一路径解析（tools/paths.py）：自发现 + xiaozhi.local.json 覆盖
 
-VENV_PY = r"C:\Users\zuowe\.workbuddy\binaries\python\envs\xiaozhi-server\Scripts\python.exe"
+ROOT = paths.ROOT
+SRV_DIR = paths.SRV_DIR
+ADMIN_DIR = paths.ADMIN_DIR
+LOG_DIR = paths.LOG_DIR
+
+VENV_PY = paths.VENV_PY or paths.BASE_PY
 VENV_PY_ADMIN = VENV_PY
-FFMPEG_BIN = r"C:\Users\zuowe\.workbuddy\binaries\ffmpeg\ffmpeg-master-latest-win64-gpl\bin"
+FFMPEG_BIN = paths.FFMPEG_BIN
 
 PORTS = {
     8000: "WS 语音",
@@ -62,7 +66,7 @@ def build_env():
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
-    if os.path.isdir(FFMPEG_BIN):
+    if FFMPEG_BIN and os.path.isdir(FFMPEG_BIN):
         env["PATH"] = FFMPEG_BIN + ";" + env.get("PATH", "")
     env.pop("MSYSTEM", None)  # ESP-IDF 的坑，这里也顺手清掉
     return env

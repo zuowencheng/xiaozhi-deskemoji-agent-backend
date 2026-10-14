@@ -2,32 +2,34 @@
 chcp 65001 >nul
 setlocal EnableExtensions
 
-REM ============================================================
-REM  小智后台 · 安装开机自启
-REM  机制：登录时静默启动「看门狗」(tools\svc_watchdog.py)，
-REM        看门狗负责保证 8000(app) / 8005(admin) 两个端口常驻，
-REM        谁挂了自己补谁。
-REM  注意：本文件必须 CRLF 行尾，改动后用 tools\fix_cmd_encoding.py 复查
-REM ============================================================
+REM 把隐藏启动器放进"启动"文件夹 —— 下次登录 Windows 自动拉起管理台
+set "STARTUP=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
 
-set "PY=C:\Users\zuowe\.workbuddy\binaries\python\versions\3.13.12\python.exe"
-set "ROOT=%~dp0..\.."
+if not exist "%STARTUP%" (
+    echo [错误] 找不到启动文件夹：
+    echo        %STARTUP%
+    pause
+    exit /b 1
+)
 
-if not exist "%PY%" (
-    echo [错误] 找不到 Python: %PY%
+copy /Y "%~dp0_admin_autostart.vbs" "%STARTUP%\XiaozhiAdmin.vbs" >nul
+if errorlevel 1 (
+    echo [错误] 复制失败，可能权限不足。
     pause
     exit /b 1
 )
 
 echo ============================================================
-echo  正在安装「开机自启 + 服务自愈」
+echo  已安装开机自启
+echo    启动文件夹: %STARTUP%
+echo    文件:       XiaozhiAdmin.vbs
 echo ============================================================
 echo.
-
-"%PY%" "%ROOT%\tools\install_autostart.py" --install --method vbs
+echo  下次登录 Windows 后：
+echo    - 管理台会在后台静默启动（没有窗口）
+echo    - 同时自动把小智后台服务一并拉起
+echo    - 直接用浏览器打开 http://127.0.0.1:8005
 echo.
-"%PY%" "%ROOT%\tools\install_autostart.py" --status
-
+echo  想取消：双击 autostart_off.cmd
 echo.
-echo 想取消：双击 autostart_off.cmd
 pause

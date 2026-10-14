@@ -6,14 +6,20 @@
 用 Write 工具直接落盘是 LF，手工转容易被忘掉，所以统一在这里出。
 """
 from pathlib import Path
+import sys
 
 ADMIN_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = ADMIN_DIR.parent.parent
 
-PY_CANDIDATES = [
-    r"C:\Users\zuowe\.workbuddy\binaries\python\versions\3.13.12\python.exe",
-    r"C:\Users\zuowe\.workbuddy\binaries\python\envs\xiaozhi-server\Scripts\python.exe",
-]
+# 路径统一走 tools/paths.py（自发现 + xiaozhi.local.json 覆盖）
+sys.path.insert(0, str(PROJECT_ROOT / "tools"))
+import paths  # noqa: E402
+
+# 候选解释器：优先服务 venv，其次基础 Python（生成的脚本里逐个探测存在的那个）
+PY_CANDIDATES = [p for p in (paths.VENV_PY, paths.BASE_PY) if p]
+# 保证至少有 2 个槽位，避免 .format(py1=, py2=) 越界
+while len(PY_CANDIDATES) < 2:
+    PY_CANDIDATES.append(PY_CANDIDATES[0] if PY_CANDIDATES else "python")
 
 START_ADMIN = """@echo off
 chcp 65001 >nul
@@ -29,6 +35,8 @@ REM ============================================================
 
 set "PY="
 for %%P in ("{py1}" "{py2}") do if not defined PY if exist %%P set "PY=%%~P"
+if not defined PY where py >nul 2>&1 && set "PY=py -3"
+if not defined PY where python >nul 2>&1 && set "PY=python"
 if not defined PY set "PY=python"
 
 cd /d "%~dp0"

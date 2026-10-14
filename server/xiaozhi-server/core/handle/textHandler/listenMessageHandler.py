@@ -94,6 +94,21 @@ class ListenTextMessageHandler(TextMessageHandler):
         if msg_json["state"] == "start":
             # 设备从播放模式切回录音模式,清除所有音频状态和缓冲区
             conn.reset_audio_states()
+            # ★ 2026-10-14 02:38 主人反馈：唤醒后立即说话仍无反应。
+            # 根因：原代码只在 `have_voice=True` 时才建 ASR WebSocket
+            #   （doubao_stream.receive_audio:75）。但主人唤醒后可能先想 1~2 秒
+            #   再开口，这期间设备发的全是静音帧，have_voice=False，ASR 永远
+            #   不建连 → 等到豆包 8s 超时断开 → 主人开口时又要走 6s 重新建连，
+            #   第一句完整掉光。
+            # 修法：listen start 一进来就把 ASR 主动建好。仍用异步任务，不阻塞。
+            #   第一次建连可能慢（数秒），但**比"等到有声音再建"**快得多。
+            if conn.asr and hasattr(conn.asr, "asr_ws") and conn.asr.asr_ws is None \
+                    and not getattr(conn.asr, "is_processing", False):
+                try:
+                    asyncio.create_task(conn.asr._ensure_connected(conn))
+                except Exception as _e:
+                    conn.logger.bind(tag=TAG).debug(
+                        f"主动建连 ASR 跳过: {_e}")
         elif msg_json["state"] == "stop":
             # 收到stop但asr未初始化，跳过处理
             if conn.asr is None:

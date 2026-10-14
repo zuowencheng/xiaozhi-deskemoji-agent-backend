@@ -233,10 +233,65 @@ class ASRProviderBase(ABC):
                     from core.utils.util import remove_punctuation_and_length as _rpl
                     from core.handle.greeting_guard import (
                         is_dup_wakeup_misrecognition,
+                        strip_wakeup_prefix,
+                        is_device_self_speech,
                     )
                     _raw = raw_text.get("content") if isinstance(raw_text, dict) else raw_text
+
+                    # ★ 2026-10-14 自听自过滤：设备播本地开场白时麦克风是开着的，
+                    #   会把自己说的话原样识别回来，大模型再一本正经答一长串，
+                    #   既莫名其妙又烧 TTS 额度。命中就丢，不进 LLM。
+                    if is_device_self_speech(_raw or ""):
+                        logger.bind(tag=TAG).info(
+                            f"[自听过滤] 丢弃设备自己的本地语音：{(_raw or '')[:20]}"
+                        )
+                        return
                     _tlen, _tflt = _rpl(_raw or "")
-                    if _tlen:
+
+                    # ★ 2026-10-13 新增：唤醒词**前缀**剥离
+                    #
+                    # 老闸只认"整句恰好等于唤醒词"，挡不住真实场景 ——
+                    # ASR 会把唤醒词那一段音频**一起识别进主人的话里**：
+                    #     20:53:48 语音生成成功: 来了            ← 本地固定开场白
+                    #     20:53:51 识别文本: 你好，小智。你现在
+                    #     20:53:53 语音生成成功: 我在呢 / 怎么了？ ← 大模型第二遍
+                    # "你好，小智。你现在" 不等于任何唤醒词 → 老闸放行 →
+                    # 一次唤醒听到两遍招呼。所以先剥掉开头的唤醒词，
+                    # 再看剩下的是真问题还是残片。
+                    _act, _out = strip_wakeup_prefix(conn, _raw or "")
+                    if _act == "drop":
+                        logger.bind(tag=TAG).info(
+                            f"[唤醒去重] 丢弃唤醒词前缀残留：{(_raw or '')[:20]}"
+                            f"（问候播出后 1.5s 内，主人还没开口）"
+                        )
+                        return
+                    if _act == "prompt":
+                        # 剥完只剩残片：主人明明开口了却没听清 → 提示重说，
+                        # 绝不让大模型再寒暄一遍，也绝不让主人干等。
+                        logger.bind(tag=TAG).info(
+                            f"[唤醒去重] 剥掉唤醒词后只剩残片 → 回一声提示："
+                            f"{(_raw or '')[:20]}"
+                        )
+                        await _speak_live(conn, "嗯？")
+                        return
+                    if _act == "strip":
+                        logger.bind(tag=TAG).info(
+                            f"[唤醒去重] 剥离唤醒词前缀：'{(_raw or '')[:20]}'"
+                            f" → '{_out[:20]}'"
+                        )
+                        # 只改 content，情绪/说话人等字段原样保留
+                        if isinstance(raw_text, dict):
+                            raw_text = dict(raw_text)
+                            raw_text["content"] = _out
+                            enhanced_text = json.dumps(raw_text,
+                                                       ensure_ascii=False)
+                        else:
+                            enhanced_text = self._build_enhanced_text(
+                                _out, speaker_name)
+                        # 已确认是真问题，跳过下面的纯唤醒词判定
+                        _tflt = ""
+
+                    if _tflt:
                         _verdict = is_dup_wakeup_misrecognition(conn, _tflt)
                         if _verdict == "drop":
                             logger.bind(tag=TAG).info(

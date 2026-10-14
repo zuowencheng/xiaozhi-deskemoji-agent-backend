@@ -18,8 +18,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SERVER = ROOT / "server" / "xiaozhi-server"
-VENV_PY = Path(r"C:\Users\zuowe\.workbuddy\binaries\python\envs\xiaozhi-server\Scripts\python.exe")
-BASE_PY = Path(r"C:\Users\zuowe\.workbuddy\binaries\python\versions\3.13.12\python.exe")
+
+# 路径统一走 tools/paths.py（自发现 + xiaozhi.local.json 覆盖，换机不用改代码）
+sys.path.insert(0, str(ROOT / "tools"))
+import paths  # noqa: E402
+
+VENV_PY = Path(paths.VENV_PY) if paths.VENV_PY else Path(sys.executable)
+BASE_PY = Path(paths.BASE_PY) if paths.BASE_PY else Path(sys.executable)
+# 若没有可用 venv，就在项目内建一个（server/.venv），做到"克隆下来就能跑"
+TARGET_VENV = ROOT / "server" / ".venv"
 REQS = SERVER / "requirements.txt"
 CONFIG = SERVER / "data" / ".config.yaml"
 MCP_CFG = SERVER / "data" / ".mcp_server_settings.json"
@@ -62,38 +69,53 @@ def main() -> None:
     print(" 小智桌面智能体 · 一键部署")
     print(f" 项目目录：{ROOT}")
     print("=" * 60)
+    print(paths.describe())
+    print("=" * 60)
 
     # 1 环境
     step(1, "环境检查")
     mark(BASE_PY.exists(), f"基础 Python：{BASE_PY}", fatal=True)
     mark(SERVER.exists(), f"服务端目录：{SERVER.name}", fatal=True)
     venv_ok = VENV_PY.exists()
-    mark(venv_ok, f"服务端虚拟环境：{VENV_PY.name}"
-         + ("" if venv_ok else " → 阶段 2 会创建"))
+    mark(venv_ok, f"服务端虚拟环境：{VENV_PY}"
+         + ("" if venv_ok else f" → 阶段 2 将在 {TARGET_VENV} 创建"))
 
     # 2 依赖
     step(2, "依赖")
+    if not venv_ok and not check_only:
+        print(f"   创建虚拟环境：{TARGET_VENV}")
+        rc, out, err = run([BASE_PY, "-m", "venv", str(TARGET_VENV)], timeout=300)
+        if rc == 0:
+            VENV_PY = (TARGET_VENV / "Scripts" / "python.exe") if os.name == "nt" \
+                else (TARGET_VENV / "bin" / "python")
+            venv_ok = VENV_PY.exists()
+        mark(venv_ok, "虚拟环境创建" + ("" if venv_ok else f"：{err[-200:]}"), fatal=not venv_ok)
+
     if venv_ok:
-        mark(True, "虚拟环境已存在，跳过创建")
         if not skip_deps and not check_only:
             print("   （提示：依赖已装好就加 --skip-deps 跳过，省几分钟）")
             rc, out, err = run([VENV_PY, "-m", "pip", "install", "-q", "-r", str(REQS)],
-                               timeout=900)
+                               timeout=1800)
             mark(rc == 0, "依赖安装" + ("" if rc == 0 else f"：{err[-200:]}"))
         else:
             mark(True, "跳过依赖安装（--skip-deps / --check-only）")
     else:
-        if check_only:
-            mark(False, "虚拟环境不存在，且当前是 --check-only，不自动创建")
-        else:
-            mark(False, f"需要手动创建虚拟环境（自动创建暂未实现）：\n"
-                        f"     {BASE_PY} -m venv {VENV_PY.parent.parent}\n"
-                        f"     {VENV_PY} -m pip install -r {REQS}", fatal=True)
+        mark(False, "虚拟环境不可用，且当前是 --check-only", fatal=check_only)
 
     # 3 配置
     step(3, "配置")
+    cfg_template = SERVER / "config.yaml"
+    if not CONFIG.exists() and not check_only and cfg_template.exists():
+        import shutil as _sh
+        _sh.copy2(cfg_template, CONFIG)
+        mark(True, f"已从 config.yaml 生成 {CONFIG.name} → ⚠️ 记得填 API Key")
     mark(CONFIG.exists(), f"主配置 .config.yaml"
          + ("" if CONFIG.exists() else " → 缺失！从 config.yaml 复制一份再填 key"), fatal=True)
+
+    if not MCP_CFG.exists() and not check_only:
+        rc, out, err = run([BASE_PY, str(ROOT / "tools" / "gen_mcp_settings.py")], timeout=60)
+        mark(rc == 0 or MCP_CFG.exists(), "生成 MCP 配置 .mcp_server_settings.json")
+        print(out[-300:] if out else "")
     if MCP_CFG.exists():
         mark(True, "MCP 配置 .mcp_server_settings.json")
         if not check_only:

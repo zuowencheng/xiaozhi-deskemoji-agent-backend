@@ -25,11 +25,16 @@ import sys
 from xml.sax.saxutils import escape
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+import paths  # 统一路径解析（tools/paths.py）：自发现 + xiaozhi.local.json 覆盖
+
+ROOT = paths.ROOT
 WATCHDOG = os.path.join(HERE, "svc_watchdog.py")
 
 TASK_NAME = "XiaozhiSvcWatchdog"
-PYW = r"C:\Users\zuowe\.workbuddy\binaries\python\versions\3.13.12\pythonw.exe"
+# 静默解释器（pythonw）由 paths 解析：优先当前解释器的 pythonw 兄弟，其次 venv / PATH
+PYW = paths.PYW_OR_PY
 
 STARTUP_DIR = os.path.join(
     os.environ.get("APPDATA", ""),

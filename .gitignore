@@ -3,6 +3,15 @@
 *.token
 mcp_endpoint*.txt
 
+# 本机路径固定配置（含本机绝对路径，换机不存在时自动发现）
+xiaozhi.local.json
+
+# 运行时生成的启动器（含本机绝对路径，由脚本按需重建）
+tools/_svc_up.cmd
+tools/_watchdog_up.cmd
+tools/_autostart_task.xml
+server/admin/_admin_autostart.vbs
+
 # 全片备份 / 固件 bin（含数据，太大且敏感）
 hardware/reports/*.bin
 *.bin
@@ -37,7 +46,9 @@ server/xiaozhi-server/_kugou_uia_dump*.txt
 server/_logs/
 *.log
 *.db
-data/.config.yaml                  # 含真实 API Key，只提交 config.yaml 模板
+# 私有配置（含真实 API Key）——只提交 config.example.yaml / config.yaml 模板
+# ⚠️ 旧版这里带了行尾注释，导致模式失效；gitignore 不支持行尾注释
+data/.config.yaml
 *.bak-*
 
 # 固件是独立的 git 仓库（fork），不进根仓库；改动靠 firmware/patches/ 导出
@@ -73,6 +84,16 @@ _download/
 
 # 运行时数据
 bridge/quota.json
+search_quota.json
 
 # 运行时状态（蒸馏进度等）
 bridge/distill_state.json
+
+# 开发过程文档归档（仅本地留存，不发布）
+_archive/
+
+# 发布产物暂存区（固件包/后端包，走 GitHub Release 分发，不进仓库）
+dist/
+
+# 一次性测试产物
+server/xiaozhi-server/桌面/

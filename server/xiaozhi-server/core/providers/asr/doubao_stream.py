@@ -67,6 +67,71 @@ class ASRProvider(ASRProviderBase):
     async def open_audio_channels(self, conn):
         await super().open_audio_channels(conn)
 
+    async def _ensure_connected(self, conn: "ConnectionHandler"):
+        """★ 2026-10-14 02:38 主人反馈：唤醒后立即说话仍无反应。
+
+        根因：原 receive_audio 只在 `have_voice=True` 时才建 ASR WebSocket。
+          主人唤醒后停顿 1~2 秒想问题，这期间 AFE 不产 PCM / 发静音帧，
+          服务端 `audio_have_voice` 一直是 False，ASR 永远不建连；
+          等到豆包 8s 超时断开 → 主人开口时又走 6s 重新建连 → 第一句掉光。
+
+        修法：listen start 一进来就主动建连。仍走 receive_audio 同一段建连代码，
+          复用 `is_processing` 防并发。失败就退回原来"有声音再建"路径。
+        """
+        if self.asr_ws is not None or self.is_processing:
+            return
+        # 用一个伪 PCM 帧走 super + 自家建连的链路。
+        # 60ms 静音帧（16kHz/16bit/单声道 = 1920B），不会触发 VAD，但能进入
+        # receive_audio → 撞 audio_have_voice=False 那条不建连 —— 不行。
+        # 所以这里直接复刻 receive_audio 的建连段，不走 super。
+        try:
+            self.is_processing = True
+            headers = self._pick_auth()
+            logger.bind(tag=TAG).info(
+                f"[主动建连] listen start 触发 ASR 提前建连: {headers}")
+            self.asr_ws = await websockets.connect(
+                self.ws_url,
+                additional_headers=headers,
+                max_size=1000000000,
+                ping_interval=None,
+                ping_timeout=None,
+                close_timeout=10,
+            )
+            request_params = self.construct_request(str(uuid.uuid4()))
+            try:
+                # ⚠️ 2026-10-14 修：原写法用了未定义常量 SERVER_FULL_REQUEST 且漏了 gzip，
+                #   必然抛 NameError（日志 "name 'SERVER_FULL_REQUEST' is not defined"），
+                #   → "提前建连"其实一直没生效（一直靠 receive_audio 的兜底路径）。
+                #   现改为与 receive_audio 完全同款：无参 generate_header()
+                #   （默认 message_type=0x01 FullClientRequest, compression=gzip）+ gzip.compress。
+                payload_bytes = str.encode(json.dumps(request_params))
+                payload_bytes = gzip.compress(payload_bytes)
+                full_client_request = self.generate_header()
+                full_client_request.extend((len(payload_bytes)).to_bytes(4, "big"))
+                full_client_request.extend(payload_bytes)
+                logger.bind(tag=TAG).info(
+                    f"[主动建连] 发送初始化请求: {request_params}")
+                await self.asr_ws.send(full_client_request)
+                init_res = await self.asr_ws.recv()
+                result = self.parse_response(init_res)
+                logger.bind(tag=TAG).info(
+                    f"[主动建连] 收到初始化响应: {result}")
+                if "code" in result and result["code"] != 1000:
+                    raise Exception(
+                        "[主动建连] ASR初始化失败: "
+                        + str(result.get("payload_msg", {}).get("error", "未知错误")))
+            except Exception as _e:
+                logger.bind(tag=TAG).error(f"[主动建连] 初始化失败: {_e}")
+                if self.asr_ws:
+                    await self.asr_ws.close()
+                    self.asr_ws = None
+            # 启动结果接收任务
+            self.forward_task = asyncio.create_task(self._forward_asr_results(conn))
+        except Exception as _e:
+            logger.bind(tag=TAG).error(f"[主动建连] 失败: {_e}")
+        finally:
+            self.is_processing = False
+
     async def receive_audio(self, conn: "ConnectionHandler", pcm_frame, audio_have_voice):
         # 先调用父类方法处理基础逻辑
         await super().receive_audio(conn, pcm_frame, audio_have_voice)

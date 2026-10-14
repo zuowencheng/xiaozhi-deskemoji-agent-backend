@@ -27,14 +27,19 @@ from datetime import datetime
 
 # ---------------- 路径 / 常量 ----------------
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
-SRV_DIR = os.path.join(ROOT, "server", "xiaozhi-server")
-ADMIN_DIR = os.path.join(ROOT, "server", "admin")
-LOG_DIR = os.path.join(ROOT, "server", "_logs")
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+import paths  # 统一路径解析（tools/paths.py）：自发现 + xiaozhi.local.json 覆盖
+
+ROOT = paths.ROOT
+SRV_DIR = paths.SRV_DIR
+ADMIN_DIR = paths.ADMIN_DIR
+LOG_DIR = paths.LOG_DIR
 LOG_PATH = os.path.join(LOG_DIR, "watchdog.log")
 
-VENV_PY = r"C:\Users\zuowe\.workbuddy\binaries\python\envs\xiaozhi-server\Scripts\python.exe"
-FFMPEG_BIN = r"C:\Users\zuowe\.workbuddy\binaries\ffmpeg\ffmpeg-master-latest-win64-gpl\bin"
+# 服务解释器 / ffmpeg 目录都由 paths 解析（换机自动适配，无需改代码）
+VENV_PY = paths.VENV_PY or paths.BASE_PY
+FFMPEG_BIN = paths.FFMPEG_BIN
 
 CHECK_INTERVAL = 20          # 巡检间隔（秒）
 GRACE = 40                   # 拉起后冷却期（秒）
@@ -98,7 +103,7 @@ def build_env():
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
-    if os.path.isdir(FFMPEG_BIN):
+    if FFMPEG_BIN and os.path.isdir(FFMPEG_BIN):
         env["PATH"] = FFMPEG_BIN + os.pathsep + env.get("PATH", "")
     env.pop("MSYSTEM", None)
     env.pop("MINGW_PREFIX", None)
