@@ -130,7 +130,25 @@ class ASRProvider(ASRProviderBase):
         except Exception as _e:
             logger.bind(tag=TAG).error(f"[主动建连] 失败: {_e}")
         finally:
-            self.is_processing = False
+            # ★ 2026-10-19 修（实锤）：成功建连后**必须保持 is_processing=True**。
+            #   发帧条件是 receive_audio 里那句
+            #       `if self.asr_ws and self.is_processing and not self._is_stopping:`
+            #   这里无条件置 False → 连接建好了却一帧都不发 → 豆包约 10s 判
+            #   "Timed out waiting for the next audio packet" 把连接踢掉 →
+            #   主人在这个空窗里说的话全丢，只能等重连后再说一遍。
+            #
+            #   症状：每次它播报完（"已开启手势识别"/"有意思"…）回到待听，
+            #   紧接着的 9~10 秒说什么都没反应，显得"反应迟钝、喊不动"。
+            #   日志铁证（2026-10-19）：
+            #     21:08:35 收到listen start → 主动建连成功
+            #     21:08:44 Timed out waiting for the next audio packet  ← 9s 静默
+            #     21:08:45 重连 → 21:08:52 才认出"退下吧"
+            #   全日志 6 天共 96 次，其中 10-14 一天 44 次。
+            #
+            #   只在**没连上**时回退标志位（connect 抛异常 / 初始化失败会把
+            #   asr_ws 关掉并置 None），与 receive_audio 正常路径保持一致。
+            if self.asr_ws is None:
+                self.is_processing = False
 
     async def receive_audio(self, conn: "ConnectionHandler", pcm_frame, audio_have_voice):
         # 先调用父类方法处理基础逻辑
