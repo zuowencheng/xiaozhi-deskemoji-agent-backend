@@ -14,7 +14,7 @@ index 4add338..59c74aa 100644
  /sdkconfig.old
  sdkconfig.old
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 9054045..3dc7853 100644
+index 9054045..8273799 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -4,7 +4,7 @@
@@ -22,20 +22,115 @@ index 9054045..3dc7853 100644
  cmake_minimum_required(VERSION 3.16)
  
 -set(PROJECT_VER "2.0.1")
-+set(PROJECT_VER "2.0.3")
++set(PROJECT_VER "2.0.4")
  
  # Add this line to disable the specific warning
  add_compile_options(-Wno-missing-field-initializers)
 diff --git a/README.md b/README.md
-index 6f8996c..36a8b42 100644
+index 6f8996c..c4bcd2f 100644
 --- a/README.md
 +++ b/README.md
-@@ -1,4 +1,4 @@
+@@ -1,7 +1,11 @@
 -# 小智AI桌面机器人ESP32-S3N16R8-Emoji手势识别音乐固件
 +# 小智AI桌面机器人ESP32-S3N16R8-Emoji手势识别固件
  基于 https://github.com/Maggotxy/xiaozhi-esp32-music  项目，添加了我们ESP32-S3N16R8-Emoji开发板并增加了手势识别功能。
  
- 当前小智框架版本：2.0.1
+-当前小智框架版本：2.0.1
++当前小智框架版本：2.0.3
++
++> 🔗 **配套的电脑端后台在另一个仓库：** [**xiaozhi-deskemoji-agent-backend**](https://github.com/zuowencheng/xiaozhi-deskemoji-agent-backend)
++> —— 跑在电脑上的语音服务、自研 MCP 工具、主动播报与管理台。
++> 本仓是**设备固件**（表情/手势/舵机/语音唤醒），两者一硬一软、配套使用。
+ 
+ ## 硬件要求
+ 
+@@ -11,7 +15,7 @@ PCB开源地址：👉[赛博太白 小智ai机器人deskemoji适配UNO外壳版
+ - INMP441 MEMS麦克风
+ - Max98357A I2S音频放大器
+ - SSD1306 OLED显示屏 (128x64)
+-- 2个SG90舵机 (水平和垂直)
++- 2个MG90S舵机 (水平和垂直) — ⚠️ **必须独立 5V 供电**，与开发板共用 5V 会因堵转电流（约 1A）拉塌电压，表现为"手势传感器失灵"（挂电脑 USB 时手势瞎、换独立电源就正常）
+ - PAJ7620U2手势识别传感器
+ - 扬声器
+ - 面包板和连接线
+@@ -57,7 +61,19 @@ PCB开源地址：👉[赛博太白 小智ai机器人deskemoji适配UNO外壳版
+ 
+ 具体说明可参见main\boards\esp32-s3n16r8-emoji\README.md
+ 
++## 本项目新增功能（本板特有）
++
++- 手势识别交互：左右上下挥手 → 头部转向 + 眼睛跟随（**面对面镜像**约定：手朝你的左侧，头朝设备的右侧）
++- 掌心前推 = 语音互动开关（不用唤醒词即可进入聆听；说话中前推可打断播报）
++- 语音开关「手势识别模式」，**断电记忆**（NVS 持久化，重启不用重设）
++- 手势触发时自动切到表情屏显示对应表情，2.5s 后回到文字屏
++- 手势模式开启时自动停掉待机随机动画
++- 语音唤起本机音乐播放器并控制播放（走系统媒体键）
++
++---
+ 
++<details>
++<summary>📦 上游「超级小智-ESP32」原始说明（继承自 Maggotxy/xiaozhi-esp32-music ← 78/xiaozhi-esp32；与本板复刻无关，点击展开）</summary>
+ 
+ # 超级小智-ESP32
+ （中文 | English(编写中) | 日本語(编写中)）
+@@ -69,7 +85,7 @@ PCB开源地址：👉[赛博太白 小智ai机器人deskemoji适配UNO外壳版
+ 
+ 我们希望通过这个项目，能够帮助大家了解 AI 硬件开发，将当下飞速发展的大语言模型应用到实际的硬件设备中。
+ 
+-如果你有任何想法或建议，请随时提出 Issues 或加入 QQ 群：暂无，Telegram群：暂无。
++如果你有任何想法或建议，请随时提出 Issues。
+ 
+ 项目主要贡献者：小霜霜Meow(抖音、B站UP)、空白泡泡糖果（B站UP），硅灵造物科技（B站UP）
+ 
+@@ -77,20 +93,6 @@ PCB开源地址：👉[赛博太白 小智ai机器人deskemoji适配UNO外壳版
+ 
+ 贡献者说明：引入部分其它贡献者在其它项目上的代码，并进行了部分修改。
+ 
+-音乐服务器、相关源码提供者(为爱发电)：小霜霜Meow
+-
+-音乐服务器源码请见 https://github.com/IntelligentlyEverything/MeowMusicServer
+-
+-### ❕注意事项
+-1. 如果小智说找不到歌曲怎么办？
+-进入[小智后台](https://xiaozhi.me/)，找到对应设备，修改角色配置
+-- 选择 DeepSeekV3 大语言模型
+-- 在人物介绍中填入
+-    - 收到音乐相关的需求时，只使用 MPC tool self.music.play_song 工具，同时禁止使用 search_music 功能。
+-
+-2. 内置API调用失败怎么办？
+-请查看具体错误代码后，加入QQ群：865754861，或电报群 http://t.me/MeowMusicServer 给出错误代码和日志，等待我们修复。
+-
+ ### ⚙️已支持硬件芯片系列
+ 
+ - ESP32
+@@ -152,8 +154,11 @@ PCB开源地址：👉[赛博太白 小智ai机器人deskemoji适配UNO外壳版
+ - 支持 ESP32-C3、ESP32-S3、ESP32-P4 芯片平台
+ - 通过设备端 MCP 实现设备控制（音量、灯光、电机、GPIO 等）
+ - 通过云端 MCP 扩展大模型能力（智能家居控制、PC桌面操作、知识搜索、邮件收发等）
+-本项目新增功能:
+-- 新增音乐播放功能，支持播放本地音乐(开发中，敬请期待)、云端音乐(完善中)。
++
++</details>
++
++<details>
++<summary>🧰 上游通用资料（面包板教程 · 70+开源硬件 · 开发环境 · 开发者文档 · 官方云配置 · 第三方项目，点击展开）</summary>
+ 
+ ## 硬件
+ 
+@@ -268,12 +273,4 @@ PCB开源地址：👉[赛博太白 小智ai机器人deskemoji适配UNO外壳版
+ - [78/xiaozhi-sf32](https://github.com/78/xiaozhi-sf32) 思澈科技的蓝牙芯片固件
+ - [QuecPython/solution-xiaozhiAI](https://github.com/QuecPython/solution-xiaozhiAI) 移远提供的 QuecPython 固件
+ 
+-## Star History
+-
+-<a href="https://star-history.com/#IntelligentlyEverything/xiaozhi-esp32&Date">
+- <picture>
+-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=IntelligentlyEverything/xiaozhi-esp32&type=Date&theme=dark" />
+-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=IntelligentlyEverything/xiaozhi-esp32&type=Date" />
+-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=IntelligentlyEverything/xiaozhi-esp32&type=Date" />
+- </picture>
+-</a>
++</details>
 diff --git a/dependencies.lock b/dependencies.lock
 index 0922260..d5e126d 100644
 --- a/dependencies.lock
@@ -509,7 +604,7 @@ new file mode 100644
 index 0000000..4e8e7a7
 Binary files /dev/null and b/main/assets/common/popup.ogg.opus-ok differ
 diff --git a/main/assets/lang_config.h b/main/assets/lang_config.h
-index ee3e709..22c95f8 100644
+index ee3e709..d55a77f 100644
 --- a/main/assets/lang_config.h
 +++ b/main/assets/lang_config.h
 @@ -1,68 +1,68 @@
@@ -634,32 +729,10 @@ index ee3e709..22c95f8 100644
      }
  
      // 音效资源 (en-US as fallback for missing audio files)
-@@ -180,6 +180,35 @@ namespace Lang {
-         static_cast<size_t>(ogg_popup_end - ogg_popup_start)
+@@ -166,6 +166,34 @@ namespace Lang {
+         static_cast<size_t>(ogg_exclamation_end - ogg_exclamation_start)
          };
  
-+        // 2026-10-03 新增：「可以说话了」提示音（150ms 单音，比 OGG_POPUP 更轻）
-+        // 放在 kDeviceStateListening 时播，主人说"他说完话后要立马有个提示音，
-+        // 我就知道可以说话了"——不用盯着小屏幕看。
-+        // ⚠️ 必须是 Opus in Ogg 格式（PlaySound 只认 "OpusHead"），
-+        //    用 OGG Vorbis 会一个字节都不播（踩过）。
-+        extern const char ogg_listening_start[] asm("_binary_listening_ogg_start");
-+        extern const char ogg_listening_end[] asm("_binary_listening_ogg_end");
-+        static const std::string_view OGG_LISTENING {
-+        static_cast<const char*>(ogg_listening_start),
-+        static_cast<size_t>(ogg_listening_end - ogg_listening_start)
-+        };
-+
-+        // 2026-10-13 新增：手势唤醒开场白「我来啦，您请讲」/ 手势关闭退场语
-+        // 「那我退下了」。用 tools/gesture_voice_synth.py 预合成（火山 ogg_opus），
-+        // 本地播放零延迟、不烧 TTS 额度、离线可用，与唤醒词路线的话术区分开。
-+        extern const char ogg_gesture_welcome_start[] asm("_binary_gesture_welcome_ogg_start");
-+        extern const char ogg_gesture_welcome_end[] asm("_binary_gesture_welcome_ogg_end");
-+        static const std::string_view OGG_GESTURE_WELCOME {
-+        static_cast<const char*>(ogg_gesture_welcome_start),
-+        static_cast<size_t>(ogg_gesture_welcome_end - ogg_gesture_welcome_start)
-+        };
-+
 +        extern const char ogg_gesture_bye_start[] asm("_binary_gesture_bye_ogg_start");
 +        extern const char ogg_gesture_bye_end[] asm("_binary_gesture_bye_ogg_end");
 +        static const std::string_view OGG_GESTURE_BYE {
@@ -667,9 +740,30 @@ index ee3e709..22c95f8 100644
 +        static_cast<size_t>(ogg_gesture_bye_end - ogg_gesture_bye_start)
 +        };
 +
-         extern const char ogg_success_start[] asm("_binary_success_ogg_start");
-         extern const char ogg_success_end[] asm("_binary_success_ogg_end");
-         static const std::string_view OGG_SUCCESS {
++        extern const char ogg_gesture_welcome_long_backup_start[] asm("_binary_gesture_welcome_long_backup_ogg_start");
++        extern const char ogg_gesture_welcome_long_backup_end[] asm("_binary_gesture_welcome_long_backup_ogg_end");
++        static const std::string_view OGG_GESTURE_WELCOME_LONG_BACKUP {
++        static_cast<const char*>(ogg_gesture_welcome_long_backup_start),
++        static_cast<size_t>(ogg_gesture_welcome_long_backup_end - ogg_gesture_welcome_long_backup_start)
++        };
++
++        extern const char ogg_gesture_welcome_start[] asm("_binary_gesture_welcome_ogg_start");
++        extern const char ogg_gesture_welcome_end[] asm("_binary_gesture_welcome_ogg_end");
++        static const std::string_view OGG_GESTURE_WELCOME {
++        static_cast<const char*>(ogg_gesture_welcome_start),
++        static_cast<size_t>(ogg_gesture_welcome_end - ogg_gesture_welcome_start)
++        };
++
++        extern const char ogg_listening_start[] asm("_binary_listening_ogg_start");
++        extern const char ogg_listening_end[] asm("_binary_listening_ogg_end");
++        static const std::string_view OGG_LISTENING {
++        static_cast<const char*>(ogg_listening_start),
++        static_cast<size_t>(ogg_listening_end - ogg_listening_start)
++        };
++
+         extern const char ogg_low_battery_start[] asm("_binary_low_battery_ogg_start");
+         extern const char ogg_low_battery_end[] asm("_binary_low_battery_ogg_end");
+         static const std::string_view OGG_LOW_BATTERY {
 diff --git a/main/audio/audio_service.cc b/main/audio/audio_service.cc
 index c854e71..712f26f 100644
 --- a/main/audio/audio_service.cc
@@ -1046,7 +1140,7 @@ index 32af69a..4491054 100644
  
  // 按钮配置
 diff --git a/main/boards/esp32-s3n16r8-emoji/emoji_board.cc b/main/boards/esp32-s3n16r8-emoji/emoji_board.cc
-index b7c2d25..672a30c 100644
+index b7c2d25..43c5f8e 100644
 --- a/main/boards/esp32-s3n16r8-emoji/emoji_board.cc
 +++ b/main/boards/esp32-s3n16r8-emoji/emoji_board.cc
 @@ -42,6 +42,11 @@
@@ -1175,9 +1269,38 @@ index b7c2d25..672a30c 100644
          // 设置表情控制器的舵机控制器
          emoji_controller_->SetServoController(servo_controller_);
          
-@@ -342,10 +428,15 @@ public:
+@@ -334,18 +420,43 @@ public:
+         
+         // 设置I2C总线句柄（与显示屏共用）
+         gesture_sensor_->SetI2CBus(display_i2c_bus_);
+-        if (gesture_sensor_->Initialize()) {
++
++        // ★ 2026-10-23 整轮重试：step0 探测窗口放宽后仍可能碰上总线异常，
++        //   这里再给一次"整轮重来"的机会（Initialize 内部会重新软复位+重写 220 个寄存器）。
++        //   以前是一次失败就 delete 掉对象 → g_gesture_sensor = nullptr，
++        //   服务端再喊「打开手势识别」只会得到"手势传感器不可用"，只能断电重来。
++        bool gesture_inited = false;
++        for (int attempt = 1; attempt <= 2; ++attempt) {
++            if (gesture_sensor_->Initialize()) {
++                gesture_inited = true;
++                if (attempt > 1) {
++                    ESP_LOGW(TAG, "PAJ7620U2第 %d 次初始化成功（前一次失败已自动重试）", attempt);
++                }
++                break;
++            }
++            ESP_LOGW(TAG, "PAJ7620U2初始化第 %d/2 次失败，800ms 后重试", attempt);
++            vTaskDelay(pdMS_TO_TICKS(800));
++        }
++
++        if (gesture_inited) {
+             // 设置舵机控制器
+             gesture_sensor_->SetServoController(servo_controller_);
+             // 设置表情控制器
+             gesture_sensor_->SetEmojiController(emoji_controller_);
              // 启动手势检测任务
              gesture_sensor_->StartGestureTask();
++            // ★ 2026-10-23 任务存活看门狗：卡死（串口上"手势诊断心跳"断流）自动重建任务
++            gesture_sensor_->StartWatchdog();
              ESP_LOGI(TAG, "PAJ7620U2手势识别传感器初始化成功");
 +            // ★ 2026-10-13 暴露给 Application：服务端 set_gesture_mode 工具
 +            //   经 system/gesture_mode 命令切手势识别模式。类定义闷在本文件里，
@@ -1191,7 +1314,7 @@ index b7c2d25..672a30c 100644
          }
          
          // 新版MCP架构不再需要设置全局情感控制器指针
-@@ -369,6 +460,8 @@ public:
+@@ -369,6 +480,8 @@ public:
          if (gesture_sensor_) {
              gesture_sensor_->StopGestureTask();
              delete gesture_sensor_;
@@ -1200,7 +1323,7 @@ index b7c2d25..672a30c 100644
          }
          
          delete emoji_controller_;
-@@ -499,8 +592,18 @@ static void StateMonitorTask(void* arg) {
+@@ -499,8 +612,18 @@ static void StateMonitorTask(void* arg) {
      
      // 确保初始状态下随机动画是启用的
      if (board->emoji_controller_) {
@@ -1221,7 +1344,7 @@ index b7c2d25..672a30c 100644
      }
      
      // 监控设备状态
-@@ -614,8 +717,22 @@ static void StateMonitorTask(void* arg) {
+@@ -614,8 +737,22 @@ static void StateMonitorTask(void* arg) {
                  
                  // 恢复随机表情动画
                  if (board->emoji_controller_) {
@@ -1246,7 +1369,7 @@ index b7c2d25..672a30c 100644
                  }
                  
                  // 触发中性情感
-@@ -766,6 +883,11 @@ void EmojiDisplay::SetEmotion(const char* emotion) {
+@@ -766,6 +903,11 @@ void EmojiDisplay::SetEmotion(const char* emotion) {
          
          ESP_LOGI(TAG, "映射到我们的表情动作: %s", mapped_emotion.c_str());
          
@@ -1603,7 +1726,7 @@ index d00a8ca..d4221d1 100644
      void ExecuteHeadShakeAnimation();
      void ExecuteHeadRollAnimation();
 diff --git a/main/boards/esp32-s3n16r8-emoji/gesture_sensor.cc b/main/boards/esp32-s3n16r8-emoji/gesture_sensor.cc
-index 76a8074..64fca67 100644
+index 76a8074..24195b4 100644
 --- a/main/boards/esp32-s3n16r8-emoji/gesture_sensor.cc
 +++ b/main/boards/esp32-s3n16r8-emoji/gesture_sensor.cc
 @@ -6,6 +6,9 @@
@@ -1630,7 +1753,44 @@ index 76a8074..64fca67 100644
  };
  
  // 传感器复位序列
-@@ -436,13 +444,35 @@ bool GestureSensor::Initialize() {
+@@ -110,6 +118,9 @@ GestureSensor::GestureSensor()
+       emoji_controller_(nullptr),
+       gesture_task_handle_(nullptr),
+       task_running_(false),
++      last_loop_tick_ms_(0),
++      watchdog_task_handle_(nullptr),
++      watchdog_recover_count_(0),
+       i2c_bus_(nullptr),
+       i2c_dev_(nullptr),
+       current_state_(STATE_IDLE),
+@@ -119,6 +130,11 @@ GestureSensor::GestureSensor()
+ }
+ 
+ GestureSensor::~GestureSensor() {
++    // ★ 2026-10-23 先停看门狗：否则对象析构后它还会去重建任务（访问已释放内存）
++    if (watchdog_task_handle_ != nullptr) {
++        vTaskDelete(watchdog_task_handle_);
++        watchdog_task_handle_ = nullptr;
++    }
+     StopGestureTask();
+     if (i2c_dev_) {
+         i2c_master_bus_rm_device(i2c_dev_);
+@@ -211,8 +227,12 @@ bool GestureSensor::Initialize() {
+     uint8_t reg_addr = 0x00; // Part ID register
+     bool is_nack = false;
+ 
+-    // 尝试探测多次 (增加到6次)
+-    const int PROBE_RETRIES = 6;
++    // ★ 2026-10-23 探测窗口 6 次×50ms(约450ms) 太窄：开机瞬间 I2C 总线和
++    //   SSD1306 抢仲裁、传感器上电未稳，都会让 step0 直接判"未连接"→ return false
++    //   → 整个上电周期手势全废，只能靠复位重来（10-23 23:38 实测踩中：
++    //   同固件同板，重刷一次就正常，220/220）。
++    //   放宽到 20 次 × 150ms(最长约 3s)，代价只是开机多等最多 3 秒。
++    const int PROBE_RETRIES = 20;
+     for (int i = 0; i < PROBE_RETRIES; i++) {
+         // 尝试获取锁并读取
+         if (i2c_mutex_) {
+@@ -436,13 +456,35 @@ bool GestureSensor::Initialize() {
      ESP_LOGI(TAG, "PAJ7620U2手势识别传感器初始化完成");
      ESP_LOGI(TAG, "请在传感器上方5-15cm处做明显的手势动作进行测试");
      ESP_LOGI(TAG, "建议: 手势要慢一点、幅度大一点，让传感器有足够时间检测");
@@ -1668,7 +1828,7 @@ index 76a8074..64fca67 100644
      // 紧急修复：简化错误处理，避免栈溢出
      esp_err_t result0 = ReadRegister(PAJ7620_ADDR_GES_PS_DET_FLAG_0, &data0);
      if (result0 != ESP_OK) {
-@@ -476,31 +506,44 @@ GestureType GestureSensor::ReadGesture() {
+@@ -476,31 +518,44 @@ GestureType GestureSensor::ReadGesture() {
          return GESTURE_NONE;
      }
      
@@ -1726,7 +1886,7 @@ index 76a8074..64fca67 100644
          detected_gesture = GESTURE_DOWN;
      } else if (data0 & GES_FORWARD_FLAG) {
          detected_gesture = GESTURE_FORWARD;
-@@ -521,6 +564,11 @@ GestureType GestureSensor::ReadGesture() {
+@@ -521,6 +576,11 @@ GestureType GestureSensor::ReadGesture() {
      if (detected_gesture != GESTURE_NONE) {
          // 防抖动：500ms内忽略重复手势
          if (pdTICKS_TO_MS(current_time - last_gesture_time) < 500) {
@@ -1738,7 +1898,70 @@ index 76a8074..64fca67 100644
              return GESTURE_NONE;
          }
          
-@@ -828,17 +876,46 @@ esp_err_t GestureSensor::SelectRegisterBank(uint8_t bank) {
+@@ -571,6 +631,62 @@ void GestureSensor::StopGestureTask() {
+     }
+ }
+ 
++// ★ 2026-10-23 存活看门狗 ---------------------------------------------------
++//   背景：10-19 有一段时间整段串口日志零条「手势诊断心跳」，等于 ReadGesture()
++//   根本没被调用；当时只能给设备断电才好。这里加一层自愈：
++//   主循环每轮刷 last_loop_tick_ms_，看门狗 5 秒查一次，超过 15 秒没刷新就
++//   把任务删掉重建。舵机锁用 AcquireControl(3000) 带超时，所以即便原任务
++//   卡在等锁上，重建后的任务也不会被永久堵死。
++uint32_t GestureSensor::NowMs() {
++    return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
++}
++
++void GestureSensor::WatchdogTaskFunction(void* pvParameters) {
++    GestureSensor* sensor = static_cast<GestureSensor*>(pvParameters);
++    ESP_LOGI(TAG, "手势任务看门狗已启动（阈值 %u ms，每 5 秒检查）",
++             (unsigned)sensor->WATCHDOG_STALL_MS);
++
++    while (true) {
++        vTaskDelay(pdMS_TO_TICKS(5000));
++        if (!sensor->task_running_) {
++            continue;
++        }
++        uint32_t last = sensor->last_loop_tick_ms_;
++        if (last == 0) {
++            continue;   // 还没跑到第一轮循环，给它时间
++        }
++        uint32_t stale = NowMs() - last;
++        if (stale > sensor->WATCHDOG_STALL_MS) {
++            sensor->watchdog_recover_count_++;
++            ESP_LOGE(TAG, "手势任务疑似卡死（%u ms 无心跳），第 %u 次强制重建",
++                     (unsigned)stale, (unsigned)sensor->watchdog_recover_count_);
++            sensor->task_running_ = false;
++            if (sensor->gesture_task_handle_ != nullptr) {
++                vTaskDelete(sensor->gesture_task_handle_);
++                sensor->gesture_task_handle_ = nullptr;
++            }
++            vTaskDelay(pdMS_TO_TICKS(200));
++            sensor->last_loop_tick_ms_ = NowMs();
++            sensor->StartGestureTask();
++            ESP_LOGW(TAG, "手势任务已重建，接下来盯「手势诊断心跳」是否恢复");
++        }
++    }
++}
++
++void GestureSensor::StartWatchdog() {
++    if (watchdog_task_handle_ != nullptr) {
++        return;
++    }
++    xTaskCreate(
++        WatchdogTaskFunction,
++        "GestureWatchdog",
++        4096,
++        this,
++        3,      // 低于手势任务(7)，别抢 CPU
++        &watchdog_task_handle_
++    );
++}
++
+ void GestureSensor::TestGestureActions() {
+     if (!servo_controller_) {
+         ESP_LOGE(TAG, "测试失败：舵机控制器未设置");
+@@ -828,17 +944,52 @@ esp_err_t GestureSensor::SelectRegisterBank(uint8_t bank) {
  void GestureSensor::GestureTaskFunction(void* pvParameters) {
      GestureSensor* sensor = static_cast<GestureSensor*>(pvParameters);
      ESP_LOGI(TAG, "手势检测任务开始运行，采用deskemoji风格的简洁处理");
@@ -1749,7 +1972,13 @@ index 76a8074..64fca67 100644
      TickType_t last_health_check = xTaskGetTickCount();
 -    
 +
++    // ★ 2026-10-23 看门狗首次刷卡，避免刚创建就被判"卡死"
++    sensor->last_loop_tick_ms_ = NowMs();
++
      while (sensor->task_running_) {
++        // ★ 2026-10-23 每轮刷卡：看门狗靠它判断任务是不是还活着
++        sensor->last_loop_tick_ms_ = NowMs();
++
 +        // ★ 2026-10-14 主人反馈"开了手势模式它自己在待机时摇头晃脑"——
 +        //   根因：SetGestureModeEnabled(true) 里那句 SetRandomAnimationEnabled(false)
 +        //   有 null guard，emoji_controller_ 未注入时被静默跳过 → 随机动画照跑。
@@ -1788,7 +2017,7 @@ index 76a8074..64fca67 100644
              // 参考deskemoji：检测到手势后立即复位舵机位置
              if (sensor->servo_controller_) {
                  sensor->servo_controller_->HeadCenter();
-@@ -846,6 +923,28 @@ void GestureSensor::GestureTaskFunction(void* pvParameters) {
+@@ -846,6 +997,28 @@ void GestureSensor::GestureTaskFunction(void* pvParameters) {
              
              // 立即处理手势，无需额外延迟
              sensor->ProcessGesture(gesture);
@@ -1817,7 +2046,7 @@ index 76a8074..64fca67 100644
              success_count++;
              
              // 手势处理后的短暂延迟，防止重复触发
-@@ -885,66 +984,127 @@ void GestureSensor::ProcessGesture(GestureType gesture) {
+@@ -885,66 +1058,127 @@ void GestureSensor::ProcessGesture(GestureType gesture) {
      
      switch (gesture) {
          case GESTURE_LEFT:
@@ -1974,7 +2203,7 @@ index 76a8074..64fca67 100644
              }
              vTaskDelay(pdMS_TO_TICKS(500));
              break;
-@@ -952,11 +1112,11 @@ void GestureSensor::ProcessGesture(GestureType gesture) {
+@@ -952,11 +1186,11 @@ void GestureSensor::ProcessGesture(GestureType gesture) {
          case GESTURE_WAVE:
              ESP_LOGI(TAG, "执行动作：挥手手势 -> 开心表情 + 摇头");
              if (emoji_controller_) {
@@ -1988,7 +2217,7 @@ index 76a8074..64fca67 100644
              }
              servo_controller_->HeadCenter();  // 恢复到中心位置
              break;
-@@ -964,11 +1124,11 @@ void GestureSensor::ProcessGesture(GestureType gesture) {
+@@ -964,11 +1198,11 @@ void GestureSensor::ProcessGesture(GestureType gesture) {
          case GESTURE_CLOCKWISE:
              ESP_LOGI(TAG, "执行动作：顺时针手势 -> 开心表情");
              if (emoji_controller_) {
@@ -2002,7 +2231,7 @@ index 76a8074..64fca67 100644
              }
              break;
              
-@@ -976,7 +1136,7 @@ void GestureSensor::ProcessGesture(GestureType gesture) {
+@@ -976,7 +1210,7 @@ void GestureSensor::ProcessGesture(GestureType gesture) {
              ESP_LOGI(TAG, "执行动作：逆时针手势 -> 随机动画");
              if (emoji_controller_) {
                  // 参考deskemoji的随机动画功能
@@ -2011,7 +2240,7 @@ index 76a8074..64fca67 100644
              }
              break;
              
-@@ -1051,4 +1211,35 @@ void GestureSensor::CheckSequentialGestures(GestureType gesture) {
+@@ -1051,4 +1285,35 @@ void GestureSensor::CheckSequentialGestures(GestureType gesture) {
      }
      
      last_gesture_time_ = current_time;
@@ -2050,10 +2279,26 @@ index 76a8074..64fca67 100644
 +    }
 +}
 diff --git a/main/boards/esp32-s3n16r8-emoji/gesture_sensor.h b/main/boards/esp32-s3n16r8-emoji/gesture_sensor.h
-index a0c1f67..d38d906 100644
+index a0c1f67..ad46536 100644
 --- a/main/boards/esp32-s3n16r8-emoji/gesture_sensor.h
 +++ b/main/boards/esp32-s3n16r8-emoji/gesture_sensor.h
-@@ -150,6 +150,19 @@ public:
+@@ -120,6 +120,15 @@ public:
+      * @brief 停止手势检测任务
+      */
+     void StopGestureTask();
++
++    /**
++     * @brief 启动手势任务存活看门狗（2026-10-23）
++     *
++     * GestureTaskFunction 每轮循环刷新 last_loop_tick_ms_；看门狗每 5 秒检查一次，
++     * 超过 15 秒没刷新（串口上表现为「手势诊断心跳」断流）就判定任务卡死，
++     * 强制 vTaskDelete + 重建任务，避免只能靠给设备断电恢复。
++     */
++    void StartWatchdog();
+     
+     /**
+      * @brief 测试手势功能，手动触发不同的手势动作
+@@ -150,6 +159,19 @@ public:
       */
      static void SetI2CMutex(SemaphoreHandle_t mutex);
  
@@ -2073,7 +2318,39 @@ index a0c1f67..d38d906 100644
  private:
      /**
       * @brief 扫描I2C总线，查找可用设备
-@@ -217,4 +230,20 @@ private:
+@@ -183,6 +205,16 @@ private:
+      * @param pvParameters 任务参数
+      */
+     static void GestureTaskFunction(void* pvParameters);
++
++    /**
++     * @brief 手势任务存活看门狗任务（2026-10-23）
++     */
++    static void WatchdogTaskFunction(void* pvParameters);
++
++    /**
++     * @brief 当前毫秒 tick（供看门狗与主循环共用）
++     */
++    static uint32_t NowMs();
+     
+     /**
+      * @brief 处理检测到的手势
+@@ -201,6 +233,14 @@ private:
+     class EmojiController* emoji_controller_;     // 表情控制器指针
+     TaskHandle_t gesture_task_handle_;          // 手势检测任务句柄
+     bool task_running_;                         // 任务运行状态
++
++    // ★ 2026-10-23 存活看门狗：GestureTaskFunction 每轮刷新 last_loop_tick_ms_，
++    //   看门狗测到超过 WATCHDOG_STALL_MS 没刷新就重建任务。
++    volatile uint32_t last_loop_tick_ms_;       // 主循环最后一次刷卡时间（ms）
++    TaskHandle_t watchdog_task_handle_;         // 看门狗任务句柄
++    uint32_t watchdog_recover_count_;           // 累计重建次数（串口可查）
++
++    static constexpr uint32_t WATCHDOG_STALL_MS = 15000;  // 判定卡死的阈值
+     
+     // I2C相关句柄
+     i2c_master_bus_handle_t i2c_bus_;           // I2C总线句柄
+@@ -217,4 +257,20 @@ private:
      
      // I2C总线互斥锁，用于与显示屏共享总线
      static SemaphoreHandle_t i2c_mutex_;
